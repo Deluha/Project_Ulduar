@@ -58,6 +58,13 @@ Two throwaway instances, local to the machine running the tests, holding no data
 PostgreSQL 18 server and an S3-compatible object store (MinIO). Their images, ports and credentials are
 stated once, in `dev_tools/services.py`.
 
+| Where | How they start | Settings |
+|---|---|---|
+| Local clone | `python dev_tools/services.py start` (Docker) | `python dev_tools/services.py env`; verify falls back to the same local defaults |
+| CI | the same command, a step of `ci-tests.yml` | `services.py env` appended to `$GITHUB_ENV` |
+
+- CI names no image, port or credential of its own; `tests/test_services.py` fails when it stops calling
+  the services command, and when the PostgreSQL server is not major version 18.
 - There is no fallback to another PostgreSQL version or another object store: if an instance cannot
   start, its tests fail and the work stops there.
 - ⚑ Pointing any of this at another server, or changing a version or an image, is ask-first.
@@ -68,7 +75,15 @@ Three GitHub Actions workflows in `.github/workflows/`. Third-party actions are 
 every checkout sets `persist-credentials: false`; a run is cancelled by a newer push only on a pull
 request, never on `main`. Header comments in each file are the detailed contract.
 
-None yet: the CI workflows arrive in Phase 0's CI commit.
+| File | Trigger | Runs |
+|---|---|---|
+| `ci-pre-commit.yml` | PR, push to `main` | `pre-commit run --all-files` (dev extra installed; skips the commit-msg `docs-sync` and pre-push `pytest-fast` hooks and the staged-only `gitleaks` hook); then the pinned, sha256-verified gitleaks scan of the PR's commits and the tree (`references/checkers.md#checker-secret-scan`) |
+| `ci-docs-sync.yml` | PR | `check_docs_sync.py --base origin/<PR base> --actor <PR author>` (full history for the per-commit `[skip-docs]` attribution; the actor drives the Dependabot exemption) |
+| `ci-tests.yml` | PR, push to `main` | `pytest -q` with coverage against the local test services, started by `python dev_tools/services.py start` with their settings from `services.py env`, the services required; gating `mypy`; gating `actionlint` (version pinned in `pyproject.toml`); `CI gate` (`needs` all three, `if: always()`, passes only when every need succeeded) stands for the whole workflow in branch protection |
+
+**Required checks.** Branch protection on `main` requires three checks, one per workflow: `CI gate`,
+`Run pre-commit hooks` and `Docs in sync with code`. `CI gate` covers only the jobs of `ci-tests.yml`; a
+red pre-commit or docs-sync run blocks a merge only when its own check is required too.
 
 No workflow holds a secret, and none connects to anything but its own local test services.
 

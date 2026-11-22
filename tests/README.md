@@ -11,7 +11,7 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 | File | Covers | Services |
 |---|---|---|
 | `conftest.py` | The database fixtures `db_dsn` and `db_conn`, the object-store fixtures `s3_settings`, `s3_client` and `s3_bucket`, the local-only guards, the `db` and `s3` markers, the required-run check | — |
-| `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1; the fixtures' guards | both |
+| `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1; CI starting them through `dev_tools/services.py`; the `services.py` command line; the fixtures' guards | both |
 | `test_check_conventions.py` | Convention rules C1–C9 on synthetic input, then the real repository | no |
 | `test_check_docs_sync.py` | The docs-sync classifier, token rules, git parsing | no |
 | `test_check_guidance_integrity.py` | Each guidance check on a miniature tree, then the real repository | no |

@@ -169,3 +169,11 @@ def test_no_service_named_selects_every_service_and_an_unknown_one_is_refused() 
     with pytest.raises(SystemExit) as raised:
         services.main(["status", "redis"])
     assert raised.value.code == 2
+
+
+def test_ci_starts_the_services_with_the_services_command() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/ci-tests.yml").read_text(encoding="utf-8")
+    assert "python dev_tools/services.py start" in workflow
+    assert 'python dev_tools/services.py env >> "$GITHUB_ENV"' in workflow
+    assert f'{REQUIRE_SERVICES_VARIABLE}: "1"' in workflow
+    assert "image:" not in workflow  # the images are stated once, in dev_tools/services.py
