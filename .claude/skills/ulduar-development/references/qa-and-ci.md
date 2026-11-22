@@ -24,7 +24,7 @@ Claude Code sessions add guards from `.claude/settings.json` (not git hooks — 
 
 | Guard | When | Does |
 |---|---|---|
-| `.claude/hooks/session-start.sh` | session start, cloud sessions only (`ULDUAR_SKIP_DEV_SETUP=1` skips it) | Installs the `dev` extra and the git hooks (skipped while the files that decide the install are unchanged) |
+| `.claude/hooks/session-start.sh` | session start, cloud sessions only (`ULDUAR_SKIP_DEV_SETUP=1` skips it) | Installs the `dev` extra and the git hooks (skipped while the files that decide the install are unchanged), starts the Docker daemon and the test services, exports their `ULDUAR_TEST_*` settings |
 | `.claude/hooks/post_edit_check.py` | after every `.py` edit | `ruff check` on the file + `dev_tools/check_conventions.py`; a failure is fed back to the model |
 | `permissions.ask` | before an edit to the guidance machinery and CI: `CLAUDE.md`, `.claude/settings.json`, `.claude/agents/`, `.claude/hooks/`, `.github/workflows/`, `.pre-commit-config.yaml`, `.gitleaks.toml` | Forces a confirmation prompt — the mechanical half of the CLAUDE.md "Ask first" list |
 | `permissions.deny` | a `Read` of `.env*`, `*.pem`, `*.pfx`, `*.key`; the `Explore` agent | Keeps secret files out of the session context; `Explore` bypasses `reader` |
@@ -60,11 +60,14 @@ stated once, in `dev_tools/services.py`.
 
 | Where | How they start | Settings |
 |---|---|---|
+| Cloud session | `.claude/hooks/session-start.sh` starts the Docker daemon, then `python dev_tools/services.py start` | exported from `services.py env`; verify falls back to the same local defaults |
 | Local clone | `python dev_tools/services.py start` (Docker) | `python dev_tools/services.py env`; verify falls back to the same local defaults |
 | CI | the same command, a step of `ci-tests.yml` | `services.py env` appended to `$GITHUB_ENV` |
+| Dev container | `db` and `s3` services in `.devcontainer/docker-compose.yml`, sharing the app container's network | set in the compose file |
 
 - CI names no image, port or credential of its own; `tests/test_services.py` fails when it stops calling
-  the services command, and when the PostgreSQL server is not major version 18.
+  the services command, when the dev container names another image, and when the PostgreSQL server is
+  not major version 18.
 - There is no fallback to another PostgreSQL version or another object store: if an instance cannot
   start, its tests fail and the work stops there.
 - ⚑ Pointing any of this at another server, or changing a version or an image, is ask-first.

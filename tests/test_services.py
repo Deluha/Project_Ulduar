@@ -177,3 +177,13 @@ def test_ci_starts_the_services_with_the_services_command() -> None:
     assert 'python dev_tools/services.py env >> "$GITHUB_ENV"' in workflow
     assert f'{REQUIRE_SERVICES_VARIABLE}: "1"' in workflow
     assert "image:" not in workflow  # the images are stated once, in dev_tools/services.py
+
+
+def test_the_dev_container_uses_the_same_images_and_credentials() -> None:
+    compose = (REPO_ROOT / ".devcontainer/docker-compose.yml").read_text(encoding="utf-8")
+    for service in services.SERVICES:
+        assert f"image: {service.image}" in compose, service.name
+        for key, value in service.environment.items():
+            assert f"{key}: {value}" in compose, key
+    for key in (S3_ACCESS_KEY_VARIABLE, S3_SECRET_KEY_VARIABLE):
+        assert f"{key}: {services.default_environment()[key]}" in compose, key

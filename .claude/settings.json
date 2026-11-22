@@ -8,6 +8,7 @@
       "Bash(python dev_tools/check_conventions.py:*)",
       "Bash(python dev_tools/check_guidance_integrity.py:*)",
       "Bash(python dev_tools/check_docs_sync.py:*)",
+      "Bash(python dev_tools/services.py:*)",
       "Bash(pytest:*)",
       "Bash(python -m pytest:*)",
       "Bash(ruff check:*)",
