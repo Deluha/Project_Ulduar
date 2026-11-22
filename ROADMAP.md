@@ -4,9 +4,9 @@ The planned scope of the next release. `RELEASE_NOTES.md` (from Phase 0 on) reco
 file records what is planned. A release's section leaves this file when the release is tagged. Owner
 decisions are dated.
 
-Concept, form and process timing (D1–D3) were decided by the owner on 2026-11-22. Everything marked
-*proposed* is a starting position and is confirmed, changed or dropped at the sign-off of the phase
-that names it. Nothing is built yet.
+Approved by the owner on 2026-11-22: the concept, the form, the process timing and every scope rule
+below (D1–D14). What is still marked *proposed* inside a phase is that phase's starting position,
+presented as a concrete proposal and confirmed at its sign-off. Nothing is built yet.
 
 ## v0.1 — A vault and observatory for data projects
 
@@ -39,9 +39,7 @@ Named after the keepers and watchers of Ulduar, the titan vault.
 | **Algalon** | The Observer, who judges whether a world still stands | Monitoring: judges freshness, missed runs, volume drift, backup age and archive integrity from what the other three recorded; reports a verdict and raises alerts. |
 | **Mimiron** | The tinkerer | The `mimiron` CLI, the connectors (a directory, `pg_dump`, Google Drive) and the GitHub Action a consumer's workflow calls. |
 
-### Scope rules
-
-Decided by the owner on 2026-11-22:
+### Scope rules (owner decisions, 2026-11-22)
 
 - **Vault and observatory (D1).** All five components are in v0.1, built in phases: catalog and archive
   first, then tooling, run ledger and monitoring.
@@ -51,35 +49,33 @@ Decided by the owner on 2026-11-22:
 - **Process ported in Phase 0 (D3).** The Project Blackwing development process (`CLAUDE.md`, agents,
   skills, hooks, checkers, CI) is copied and amended in the first development session. This planning
   session wrote this file only.
-- **Delivery.** One pull request per phase, several commits each. Each phase lists what the owner
+- **Delivery (D4).** One pull request per phase, several commits each. Each phase lists what the owner
   confirms before its code is written.
 
-*Proposed*, confirmed at the Phase 0 sign-off unless another phase is named:
-
-- **Generic core.** No consumer's name, schema, table or convention enters the package. A consumer
+- **Generic core (D5).** No consumer's name, schema, table or convention enters the package. A consumer
   integrates through an adapter and a configuration file in its own repository.
-- **Read-only towards consumers.** Ulduar never writes to a consumer's database or source folder. It
+- **Read-only towards consumers (D6).** Ulduar never writes to a consumer's database or source folder. It
   reads through a role that can only read, and it writes only to the Archivum and the archive store.
-- **The vault is immutable.** An archived object is never overwritten. Deletion happens only by a
+- **The vault is immutable (D7).** An archived object is never overwritten. Deletion happens only by a
   declared retention rule and is itself recorded. Recorded history (catalog entries, runs, verdicts)
   is corrected by a new record, never by an edit.
-- **Stores.** PostgreSQL 18 for the Archivum; an S3-compatible bucket or a local directory for the
+- **Stores (D8).** PostgreSQL 18 for the Archivum; an S3-compatible bucket or a local directory for the
   archive, behind one storage interface.
-- **Own schema through Caverns of Time.** The Archivum's tables are created and changed through the
+- **Own schema through Caverns of Time (D9).** The Archivum's tables are created and changed through the
   `caverns-of-time` ledger, making Ulduar its second consumer. Depends on that library's Nozdormu phase
-  being merged; confirmed at the Phase 1 sign-off, with a plain versioned-SQL fallback if it is not.
-- **Real services in tests.** Database behaviour is tested on a real PostgreSQL 18 and archive
+  being merged; if it is not when Phase 1 starts, Phase 1 uses plain versioned SQL and says so at its sign-off.
+- **Real services in tests (D10).** Database behaviour is tested on a real PostgreSQL 18 and archive
   behaviour on a real S3-compatible server, both throwaway containers. No mocks; a skipped service
   test fails the done gate.
-- **Never a live system.** No test, workflow or development session of this repository connects to a
+- **Never a live system (D11).** No test, workflow or development session of this repository connects to a
   consumer's database, Drive folder or bucket. Running Ulduar against live data is the consumer
   owner's own run.
-- **No secrets.** Credentials arrive from the environment at run time. None is stored in the
+- **No secrets (D12).** Credentials arrive from the environment at run time. None is stored in the
   Archivum, written to a log or committed.
-- **Not a backup system of record.** Hodir archives logical dumps and files and proves they can be
+- **Not a backup system of record (D13).** Hodir archives logical dumps and files and proves they can be
   restored. Point-in-time recovery (the pgBackRest plans of Blackwing Analytics and DeveloPath) stays
   with each product.
-- **No personal data in v0.1.** The first consumer's data is football statistics. Archiving data about
+- **No personal data in v0.1 (D14).** The first consumer's data is football statistics. Archiving data about
   academy players or staff (DeveloPath) needs encryption, retention and erasure rules first: see Later.
 
 ### Status
@@ -137,7 +133,7 @@ engines, twin reports).
 
 Sign-off:
 
-- The hard rules. *Proposed*: generic core; one canonical helper; safe SQL; no unasked files; the vault
+- The hard rules: their final wording in `CLAUDE.md`. They restate scope rules D5–D12. *Proposed*: generic core; one canonical helper; safe SQL; no unasked files; the vault
   is immutable; read-only towards consumers; own schema through the ledger; docs move with the code;
   real services in tests; one module per component with a flow-only CLI entry; no secrets stored or logged.
 - The ask-first list. *Proposed*: the Archivum schema; the archive's object layout and checksum
@@ -145,7 +141,6 @@ Sign-off:
   Algalon's default thresholds and any relaxation of a check; runtime dependencies; supported
   PostgreSQL versions; connecting anything to a system other than the local test services; the
   guidance machinery and CI.
-- The remaining *proposed* scope rules above.
 - Package name and layout. *Proposed*: distribution `project-ulduar`, import package `ulduar`, one
   module per component (`freya`, `hodir`, `thorim`, `algalon`), `mimiron` the only CLI entry, dev
   tooling in `dev_tools/`; Python 3.11 or newer.
