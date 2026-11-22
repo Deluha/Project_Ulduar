@@ -82,7 +82,7 @@ Named after the keepers and watchers of Ulduar, the titan vault.
 
 | Phase | Status | Pull request |
 |---|---|---|
-| 0 — Development process | In progress | |
+| 0 — Development process | In review | [#2](https://github.com/Deluha/Project_Ulduar/pull/2) |
 | 1 — Freya | Not started | |
 | 2 — Hodir | Not started | |
 | 3 — Mimiron | Not started | |
