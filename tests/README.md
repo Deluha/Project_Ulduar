@@ -11,7 +11,7 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 | File | Covers | Services |
 |---|---|---|
 | `conftest.py` | The database fixtures `db_dsn` and `db_conn`, the object-store fixtures `s3_settings`, `s3_client` and `s3_bucket`, the local-only guards, the `db` and `s3` markers, the required-run check | — |
-| `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1; CI starting them through `dev_tools/services.py`; the dev container naming the same images and credentials; the `services.py` command line; the fixtures' guards | both |
+| `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1 and recreated on another image; the S3 client ignoring proxies; CI starting them through `dev_tools/services.py`; the dev container naming the same images and credentials; the `services.py` command line; the fixtures' guards | both |
 | `test_check_conventions.py` | Convention rules C1–C9 on synthetic input, then the real repository | no |
 | `test_check_docs_sync.py` | The docs-sync classifier, token rules, git parsing | no |
 | `test_check_guidance_integrity.py` | Each guidance check on a miniature tree, then the real repository | no |
@@ -30,10 +30,10 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
   `s3`, automatically.
 - The settings come from `ULDUAR_TEST_DSN` and `ULDUAR_TEST_S3_ENDPOINT`, `ULDUAR_TEST_S3_ACCESS_KEY`,
   `ULDUAR_TEST_S3_SECRET_KEY` (names and defaults: `dev_tools/services.py`). Every database `host` and
-  `hostaddr` entry, as libpq reads them, must be `localhost`, `127.0.0.1` or `::1`; a host list, a
-  `host=` parameter, a service entry or a missing host fails the test, and so does a set `PGHOSTADDR`,
+  `hostaddr` entry, as libpq reads them, must be `localhost`, `127.0.0.1` or `::1`; a host list or a
+  `host=` / `hostaddr=` parameter naming any other host, a service entry or a missing host fails the test, and so does a set `PGHOSTADDR`,
   `PGSERVICE` or `PGSERVICEFILE`. The object-store endpoint must be an `http` or `https` URL on one of
-  the same hosts.
+  the same hosts, and the S3 client ignores `HTTP_PROXY` / `HTTPS_PROXY`, so no request leaves this machine.
 - With `ULDUAR_REQUIRE_SERVICES=1` a run in which no database test or no object-store test passed fails
   as a whole, so deselecting the service tests cannot produce a green run.
 
@@ -49,7 +49,8 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 - Start the services: `python dev_tools/services.py start`; their settings:
   `python dev_tools/services.py env`.
 - A test never opens its own connection or S3 client, never names a connection string and never skips
-  itself (checker rules C6 and C9). The two tests whose subject is a connection string may spell one:
+  itself (checker rules C6 and C9). A test that needs a second connection takes it from the conftest
+  helper `rolled_back_connection`, fed the guarded `db_dsn`. The two tests whose subject is a connection string may spell one:
   `test_services.py` (the guards) and `test_check_conventions.py` (the checker).
 - With `ULDUAR_REQUIRE_SERVICES=1` exported, a targeted run that does not select a test of each service
   exits 1 by design.

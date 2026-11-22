@@ -92,8 +92,9 @@ Enforced: the docs-sync guard (commit-msg hook, verify, and CI where its check i
 - Behaviour that touches the database is tested against PostgreSQL 18, and behaviour that touches the
   archive against an S3-compatible server (and a real directory for the local backend) — never a mock,
   a stub client or another engine.
-- Tests reach the services only through the fixtures of `tests/conftest.py`; a test never opens its own
-  connection or client and never names a connection string.
+- Tests reach the services only through the fixtures of `tests/conftest.py`, or a conftest helper fed a
+  fixture's guarded address (`rolled_back_connection(db_dsn)`); a test never opens its own connection or
+  client and never names a connection string.
 - Every service address must point at this machine. No test, workflow or session connects to a
   consumer's database, Drive folder or bucket, or to any shared service.
 - A test never skips itself. Without the test services a service test skips with a notice under plain

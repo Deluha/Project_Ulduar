@@ -24,7 +24,8 @@ library only, so each script runs on a bare Python. Not part of the distribution
 - The checkers are pure functions over explicit inputs; each `main()` wires the real repository. What
   each one parses: `.claude/skills/ulduar-development/references/checkers.md`.
 - `services.py` holds the images, ports, throwaway credentials and the names of the variables the tests
-  read, in one place. `start` is idempotent and waits until each service answers: PostgreSQL over TCP
+  read, in one place. `start` is idempotent, recreates a container that runs another image than the one stated here, and
+  waits until each service answers: PostgreSQL over TCP
   (`pg_isready`), MinIO on its readiness endpoint. `env` prints the settings as `KEY=VALUE` lines.
 
 ## Interfaces & contracts
@@ -38,7 +39,8 @@ library only, so each script runs on a bare Python. Not part of the distribution
 | `services.py` | 0 done · 1 a service could not start or is not ready |
 
 `check_docs_sync.git` and `GitError` are shared by `verify.py` and `check_conventions.py`; the variable
-names and `default_environment()` of `services.py` are shared by `verify.py` and `tests/conftest.py`.
+names of `services.py` are shared by `verify.py` and `tests/conftest.py`, and `default_environment()` by
+`verify.py` and the tests.
 
 ## Extending
 

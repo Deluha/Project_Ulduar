@@ -187,3 +187,20 @@ def test_the_dev_container_uses_the_same_images_and_credentials() -> None:
             assert f"{key}: {value}" in compose, key
     for key in (S3_ACCESS_KEY_VARIABLE, S3_SECRET_KEY_VARIABLE):
         assert f"{key}: {services.default_environment()[key]}" in compose, key
+
+
+def test_the_s3_client_ignores_environment_proxies(s3_client: Any) -> None:
+    # An unset `proxies` would let botocore send the signed requests through $HTTP(S)_PROXY.
+    assert s3_client.meta.config.proxies == {}
+
+
+def test_a_container_on_another_image_is_not_counted_as_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = services.SERVICES[0]
+
+    def inspect(output: str) -> Any:
+        return lambda *args: subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr(services, "_docker", inspect(f"true {service.image}\n"))
+    assert services.is_running(service)
+    monkeypatch.setattr(services, "_docker", inspect("true postgres:17\n"))
+    assert not services.is_running(service)

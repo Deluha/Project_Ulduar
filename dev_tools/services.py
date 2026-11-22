@@ -113,9 +113,9 @@ def run_arguments(service: Service) -> list[str]:
 
 
 def is_running(service: Service) -> bool:
-    """Whether the service's container exists and is running."""
-    out = _docker("inspect", "--format", "{{.State.Running}}", service.container)
-    return out.returncode == 0 and out.stdout.strip() == "true"
+    """Whether the service's container exists, is running and runs the image stated here."""
+    out = _docker("inspect", "--format", "{{.State.Running}} {{.Config.Image}}", service.container)
+    return out.returncode == 0 and out.stdout.split() == ["true", service.image]
 
 
 def _wait_until_ready(service: Service) -> bool:
@@ -130,7 +130,7 @@ def _wait_until_ready(service: Service) -> bool:
 def start_one(service: Service) -> int:
     """Run the container if it is not running, then wait until the service answers."""
     if not is_running(service):
-        _docker("rm", "-f", service.container)  # a stopped leftover blocks the name
+        _docker("rm", "-f", service.container)  # a stopped leftover, or one on an older image, blocks the name
         run = _docker(*run_arguments(service))
         if run.returncode != 0:
             print(f"❌ test-services: {service.name}: docker run failed: {run.stderr.strip()}", file=sys.stderr)

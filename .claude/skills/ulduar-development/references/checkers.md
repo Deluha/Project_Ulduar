@@ -19,7 +19,7 @@ error is left to ruff. Tests: `tests/test_check_conventions.py`.
 | C6 | R9 | `tests/*.py` | a call to `connect` (bare or as an attribute); an import of `connect`; an import of an S3 client library (`boto3`, `botocore`); a string containing a PostgreSQL connection-string scheme | `tests/conftest.py`; for the string only, the two tests whose subject is a connection string (`tests/test_services.py`, `tests/test_check_conventions.py`) |
 | C7 | R10 | package `.py` | an import of `argparse`, `click` or `typer` | the package's `mimiron` module |
 | C8 | R11 | all files | a tracked `.env*`, `*.pem`, `*.pfx`, `*.key`, `*.egg-info` or `settings.local.json` | — |
-| C9 | R9 | `tests/*.py` | the names `skip`, `skipif`, `xfail`, `importorskip`, `SkipTest`, `skipIf`, `skipUnless` or `expectedFailure`, as an attribute, a bare name or an import | `tests/conftest.py` |
+| C9 | R9 | `tests/*.py` | the names `skip`, `skipif`, `xfail`, `importorskip`, `SkipTest`, `skipTest`, `skipIf`, `skipUnless` or `expectedFailure`, as an attribute, a bare name or an import | `tests/conftest.py` |
 
 R5, R6, R7, R11 beyond C8, and the parts of R1, R3 and R10 a parser cannot see are review-enforced
 (`references/conventions.md`). C3 sees only a formatted string passed directly; a statement formatted on an

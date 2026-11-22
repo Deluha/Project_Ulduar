@@ -63,7 +63,7 @@ stated once, in `dev_tools/services.py`.
 | Cloud session | `.claude/hooks/session-start.sh` starts the Docker daemon, then `python dev_tools/services.py start` | exported from `services.py env`; verify falls back to the same local defaults |
 | Local clone | `python dev_tools/services.py start` (Docker) | `python dev_tools/services.py env`; verify falls back to the same local defaults |
 | CI | the same command, a step of `ci-tests.yml` | `services.py env` appended to `$GITHUB_ENV` |
-| Dev container | `db` and `s3` services in `.devcontainer/docker-compose.yml`, sharing the app container's network | set in the compose file |
+| Dev container | `db` and `s3` services in `.devcontainer/docker-compose.yml`; `app` and `s3` share the `db` network namespace | set in the compose file |
 
 - CI names no image, port or credential of its own; `tests/test_services.py` fails when it stops calling
   the services command, when the dev container names another image, and when the PostgreSQL server is

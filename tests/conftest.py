@@ -211,14 +211,18 @@ def s3_settings() -> S3Settings:
 
 @pytest.fixture(scope="session")
 def s3_client(s3_settings: S3Settings) -> Any:
-    """An S3 client for the local object store; it never reads credentials or an endpoint from elsewhere."""
+    """An S3 client for the local object store; it never reads credentials, an endpoint or a proxy from elsewhere.
+
+    `proxies={}` is explicit: left unset, botocore would route through $HTTP(S)_PROXY, sending signed
+    requests to another machine whatever the guarded endpoint says.
+    """
     return boto3.session.Session().client(
         "s3",
         endpoint_url=s3_settings.endpoint,
         aws_access_key_id=s3_settings.access_key,
         aws_secret_access_key=s3_settings.secret_key,
         region_name="us-east-1",
-        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 2}),
+        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 2}, proxies={}),
     )
 
 

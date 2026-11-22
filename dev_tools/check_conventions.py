@@ -44,7 +44,9 @@ S3_CLIENT_MODULES = {"boto3", "botocore"}
 # C6: connection-string schemes a test may not spell.
 DSN_SCHEMES = ("postgresql://", "postgres://")
 # C9: names that skip or excuse a test.
-SKIP_NAMES = {"skip", "skipif", "xfail", "importorskip", "SkipTest", "skipIf", "skipUnless", "expectedFailure"}
+SKIP_NAMES = {
+    "skip", "skipif", "xfail", "importorskip", "SkipTest", "skipTest", "skipIf", "skipUnless", "expectedFailure",
+}  # fmt: skip
 # C7: command-line parsing lives in the Mimiron entry module only.
 CLI_MODULES = {"argparse", "click", "typer"}
 CLI_ENTRY = PACKAGE + "mimiron.py"
@@ -263,13 +265,14 @@ def run_all(files: list[str], sources: list[Source]) -> list[str]:
 
 
 def repo_inputs(repo_root: Path = REPO_ROOT) -> tuple[list[str], list[Source]]:
-    """Tracked plus untracked-but-not-ignored files that exist, and the text of the package and test files."""
+    """Tracked plus untracked-but-not-ignored files that exist, and the text of every package file and of
+    the test files (C1 reads a package file of any type: a consumer name in a TOML default counts too)."""
     listed = git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
     files = sorted({f for f in listed if (repo_root / f).is_file()})
     sources = [
-        (f, (repo_root / f).read_text(encoding="utf-8"))
+        (f, (repo_root / f).read_text(encoding="utf-8", errors="replace"))
         for f in files
-        if f.startswith((PACKAGE, TESTS)) and f.endswith((".py", ".sql", ".md"))
+        if f.startswith(PACKAGE) or (f.startswith(TESTS) and f.endswith((".py", ".sql", ".md")))
     ]
     return files, sources
 

@@ -46,13 +46,9 @@ One line each; the contracts are in the pointers (`qa-and-ci.md` and `checkers.m
 
 ## Conventions
 
-- Read `CLAUDE.md` first — it holds the binding hard rules (generic core, one canonical helper, safe
-  SQL, no unasked files, the immutable vault, read-only towards consumers, own schema through the
-  ledger, docs moving with the code, real services in tests, one module per component, no secrets
-  stored or logged). Their full forms are `.claude/skills/ulduar-development/references/conventions.md`;
-  task routing is the skill's `SKILL.md`.
-- The Archivum schema, the archive's object layout and checksum, the public API and CLI, retention and
-  deletion, Algalon's thresholds and runtime dependencies are ask-first changes — confirm with the owner.
+- Read `CLAUDE.md` first — it holds the binding hard rules and the ask-first list: confirm any change
+  on that list with the owner. The rules' full forms are
+  `.claude/skills/ulduar-development/references/conventions.md`; task routing is the skill's `SKILL.md`.
 
 ## Commit messages
 

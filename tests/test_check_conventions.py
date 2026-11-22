@@ -95,6 +95,8 @@ def test_c9_test_skips() -> None:
     assert [line.split(":")[1] for line in cc.check_test_skips([("tests/test_b.py", bare)])] == ["2", "4", "5"]
     unit = "import unittest\n@unittest.skipUnless(False, 'x')\n@unittest.expectedFailure\ndef test_a(): ...\n"
     assert [line.split(":")[1] for line in cc.check_test_skips([("tests/test_b.py", unit)])] == ["2", "3"]
+    case = "class T:\n    def test_a(self):\n        self.skipTest('no db')\n"
+    assert [line.split(":")[1] for line in cc.check_test_skips([("tests/test_c.py", case)])] == ["3"]
 
 
 def test_syntax_errors_are_left_to_ruff() -> None:
