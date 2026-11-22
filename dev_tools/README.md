@@ -24,9 +24,9 @@ library only, so each script runs on a bare Python. Not part of the distribution
 - The checkers are pure functions over explicit inputs; each `main()` wires the real repository. What
   each one parses: `.claude/skills/ulduar-development/references/checkers.md`.
 - `services.py` holds the images, ports, throwaway credentials and the names of the variables the tests
-  read, in one place. `start` is idempotent, recreates a container that runs another image than the one stated here, and
-  waits until each service answers: PostgreSQL over TCP
-  (`pg_isready`), MinIO on its readiness endpoint. `env` prints the settings as `KEY=VALUE` lines.
+  read, in one place. `start` is idempotent, recreates a container that runs another image than the one
+  stated here, and waits until each service answers: PostgreSQL over TCP (`pg_isready`), MinIO on its
+  readiness endpoint. `env` prints the settings as `KEY=VALUE` lines.
 
 ## Interfaces & contracts
 

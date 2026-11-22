@@ -31,9 +31,10 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 - The settings come from `ULDUAR_TEST_DSN` and `ULDUAR_TEST_S3_ENDPOINT`, `ULDUAR_TEST_S3_ACCESS_KEY`,
   `ULDUAR_TEST_S3_SECRET_KEY` (names and defaults: `dev_tools/services.py`). Every database `host` and
   `hostaddr` entry, as libpq reads them, must be `localhost`, `127.0.0.1` or `::1`; a host list or a
-  `host=` / `hostaddr=` parameter naming any other host, a service entry or a missing host fails the test, and so does a set `PGHOSTADDR`,
-  `PGSERVICE` or `PGSERVICEFILE`. The object-store endpoint must be an `http` or `https` URL on one of
-  the same hosts, and the S3 client ignores `HTTP_PROXY` / `HTTPS_PROXY`, so no request leaves this machine.
+  `host=` / `hostaddr=` parameter naming any other host, a service entry or a missing host fails the
+  test, and so does a set `PGHOSTADDR`, `PGSERVICE` or `PGSERVICEFILE`. The object-store endpoint must
+  be an `http` or `https` URL on one of the same hosts, and the S3 client ignores `HTTP_PROXY` /
+  `HTTPS_PROXY`, so no request leaves this machine.
 - With `ULDUAR_REQUIRE_SERVICES=1` a run in which no database test or no object-store test passed fails
   as a whole, so deselecting the service tests cannot produce a green run.
 
@@ -50,8 +51,9 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
   `python dev_tools/services.py env`.
 - A test never opens its own connection or S3 client, never names a connection string and never skips
   itself (checker rules C6 and C9). A test that needs a second connection takes it from the conftest
-  helper `rolled_back_connection`, fed the guarded `db_dsn`. The two tests whose subject is a connection string may spell one:
-  `test_services.py` (the guards) and `test_check_conventions.py` (the checker).
+  helper `rolled_back_connection`, fed the guarded `db_dsn`. The two tests whose subject is a
+  connection string may spell one: `test_services.py` (the guards) and `test_check_conventions.py`
+  (the checker).
 - With `ULDUAR_REQUIRE_SERVICES=1` exported, a targeted run that does not select a test of each service
   exits 1 by design.
 - A changed behaviour means updating its test deliberately in the same PR, never loosening an assertion.
