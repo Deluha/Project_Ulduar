@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import pathlib
 import re
 
 import pytest
@@ -12,27 +13,63 @@ from dev_tools import check_conventions as cc
 PKG = "ulduar/"
 
 
-def test_c1_forbidden_digest_in_any_text_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    word = "zzforbiddenzz"
-    monkeypatch.setattr(cc, "FORBIDDEN_NAME_DIGESTS", frozenset({hashlib.sha256(word.encode()).hexdigest()}))
+WORD = "zzforbiddenzz"  # a synthetic stand-in; the real deny-list holds digests only
+
+
+@pytest.fixture
+def synthetic_deny_list(monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(cc, "FORBIDDEN_NAME_DIGESTS", frozenset({hashlib.sha256(WORD.encode()).hexdigest()}))
+    monkeypatch.setattr(cc, "FORBIDDEN_NAME_LENGTHS", frozenset({len(WORD)}))
+    return hashlib.sha256(WORD.encode()).hexdigest()[:8]
+
+
+def test_c1_finds_the_word_whole_or_glued_into_a_longer_run(synthetic_deny_list: str) -> None:
     sources = [
-        (PKG + "a.py", f'"""Doc."""\nX = "Project {word.title()}"\n'),
-        ("tests/test_t.py", f"# {word}\n"),
-        ("docs/notes.md", f"clean\nsee the {word.upper()}-project and {word} again\n"),
-        (PKG + "ok.py", "X = 'zzforbidden zz'\n"),
-        ("README.md", f"{word}s and x{word} are other words\n"),
+        (PKG + "a.py", f'"""Doc."""\nX = "Project {WORD.title()}"\n'),
+        ("tests/test_t.py", f"# {WORD}\n"),
+        ("docs/notes.md", f"clean\nsee the {WORD.upper()}-project and {WORD} again\n"),
+        (PKG + "ok.py", "X = 'zzforbidden zz'\nY = 'unrelated words only'\n"),
+        ("README.md", f"{WORD}s and x{WORD} and {WORD.title()}Adapter\n"),
     ]
-    out = cc.check_generic_core(sources)
-    assert out == [
-        f"{PKG}a.py:2: C1 name of another project `{word}` (R1)",
-        f"tests/test_t.py:1: C1 name of another project `{word}` (R1)",
-        f"docs/notes.md:2: C1 name of another project `{word}` (R1)",
+    message = f"C1 name of another project (digest {synthetic_deny_list}…) (R1)"
+    assert cc.check_generic_core(sources) == [
+        f"{PKG}a.py:2: {message}",
+        f"tests/test_t.py:1: {message}",
+        f"docs/notes.md:2: {message}",
+        f"README.md:1: {message}",
     ]
+
+
+def test_c1_message_carries_the_digest_prefix_and_never_the_word(synthetic_deny_list: str) -> None:
+    out = cc.check_generic_core([("a.md", f"{WORD}\n"), (f"dir/{WORD}.txt", "clean\n")])
+    assert len(out) == 2 and all(f"(digest {synthetic_deny_list}…)" in line for line in out)
+    assert WORD not in out[0].lower()  # a path hit names the path, which holds the word by definition
+    assert out[1] == f"dir/{WORD}.txt: C1 name of another project in the path (digest {synthetic_deny_list}…) (R1)"
+
+
+@pytest.mark.usefixtures("synthetic_deny_list")
+def test_c1_scans_paths() -> None:
+    out = cc.check_generic_core([(f"docs/{WORD.title()}Notes/a.txt", "clean\n"), ("docs/other/a.txt", "clean\n")])
+    assert len(out) == 1 and "C1 name of another project in the path" in out[0]
 
 
 def test_c1_real_deny_list_is_six_sha256_digests() -> None:
     assert len(cc.FORBIDDEN_NAME_DIGESTS) == 6
     assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in cc.FORBIDDEN_NAME_DIGESTS)
+    assert 1 <= len(cc.FORBIDDEN_NAME_LENGTHS) <= 6
+    assert all(isinstance(n, int) and n > 0 for n in cc.FORBIDDEN_NAME_LENGTHS)
+
+
+def test_repo_inputs_skips_binary_files_and_reads_invalid_utf8(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    (tmp_path / "bin.dat").write_bytes(b"abc\x00def")
+    (tmp_path / "latin.txt").write_bytes(b"caf\xe9 text\n")
+    (tmp_path / "ünï.md").write_text("plain\n", encoding="utf-8")
+    monkeypatch.setattr(cc, "git", lambda *args: "bin.dat\0latin.txt\0ünï.md\0missing.txt\0")
+    files, sources = cc.repo_inputs(tmp_path)
+    assert files == ["bin.dat", "latin.txt", "ünï.md"]
+    assert dict(sources) == {"latin.txt": "caf\ufffd text\n", "ünï.md": "plain\n"}
 
 
 def test_c2_print_outside_console_module() -> None:

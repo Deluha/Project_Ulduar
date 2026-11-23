@@ -11,7 +11,7 @@ error is left to ruff. Tests: `tests/test_check_conventions.py`.
 
 | Rule | Hard rule | Scope | Fails on | Exempt |
 |---|---|---|---|---|
-| C1 | R1 | every tracked text file (UTF-8) | a word (a run of ASCII letters, lower-cased) whose SHA-256 digest is in `FORBIDDEN_NAME_DIGESTS`; the words are never written in the repository | — |
+| C1 | R1 | every tracked or untracked-but-not-ignored text file (binary skipped), and every path | a letter-run or path containing a word whose SHA-256 digest is in the deny-list (`FORBIDDEN_NAME_DIGESTS`, with the word lengths in `FORBIDDEN_NAME_LENGTHS`); the words are never written in the repository and the message shows only a digest prefix | none |
 | C2 | R2 | package `.py` | a call to `print()` | the package's `console` module |
 | C3 | R3 | package `.py` | plain text formatted into the first argument of `execute` / `executemany`: an f-string, or `%`, `+` or `.format()` on a string literal | the driver's own composition objects (no string-literal operand) |
 | C4 | R4 | all files | a `test_*.py` / `*_test.py` outside `tests/`; a `.md` that is not a permanent doc, a `README.md` or under `.claude/` | — |

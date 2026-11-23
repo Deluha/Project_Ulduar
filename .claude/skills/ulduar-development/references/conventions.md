@@ -13,7 +13,8 @@ exception. Project, dataset, job, schema, table, bucket and path names always ar
 configuration, never as constants. Ulduar is also standalone: no other project is named anywhere in the
 repository and none is a dependency.
 
-Enforced: C1 (a deny-list of hashed project names, over the whole repository), review for the rest.
+Enforced: C1 (a deny-list of hashed project names, matched inside every letter-run of every text file and
+path of the repository), review for the rest.
 
 ## R2 one canonical helper
 
@@ -72,7 +73,8 @@ Enforced: review; the connectors' phase adds a test that a write through a conne
 
 The Archivum's tables, views and functions are created and changed by steps recorded in Ulduar's own
 versioned-SQL ledger. No ad-hoc DDL in application code, no schema created as a side effect of an
-unrelated call.
+unrelated call. The ledger's own table is created by the ledger's bootstrap, the one statement outside a
+step.
 Workflow: `references/workflows/changing-own-schema.md`.
 
 Enforced: review, plus the workflow's test checklist.

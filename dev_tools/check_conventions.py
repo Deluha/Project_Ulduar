@@ -24,8 +24,9 @@ from dev_tools.check_docs_sync import GitError, git  # noqa: E402
 PACKAGE = "ulduar/"
 TESTS = "tests/"
 
-# C1: SHA-256 hex digests of lower-case words that name another project; no tracked text file may contain one
-# (the words themselves are kept out of the repository). To add one: hashlib.sha256(word.encode()).hexdigest().
+# C1: SHA-256 hex digests of lower-case words that name another project; no tracked text file or path may contain
+# one inside a run of letters (the words themselves are kept out of the repository). To add one: append
+# hashlib.sha256(word.encode()).hexdigest() and its len(word) to FORBIDDEN_NAME_LENGTHS.
 FORBIDDEN_NAME_DIGESTS = frozenset({
     "07de97ba846bea2c77ab629017947804aa3bd8880dd65eea0cf5357b9cedf6b1",
     "382c41b564afb6e20445b140900ce246294d9deeaab6fde8eb7e1227e3a4bd01",
@@ -34,6 +35,7 @@ FORBIDDEN_NAME_DIGESTS = frozenset({
     "1c1a31afd099e7a8025eb24230c224edcfb86a84f63294ab5febbc5eab8396f4",
     "f76ea091b81b488eaff139e449ca2b80ebb985cd94d901bc0108349158fd78ed",
 })  # fmt: skip
+FORBIDDEN_NAME_LENGTHS = frozenset({6, 7, 8, 9, 10})  # the lengths of the words behind the digests above
 WORD_RE = re.compile(r"[A-Za-z]+")
 # C2: the one package module allowed to call print().
 CONSOLE_MODULE = PACKAGE + "console.py"
@@ -77,17 +79,38 @@ def _package_sources(sources: Iterable[Source]) -> Iterator[Source]:
     return ((p, s) for p, s in sources if p.startswith(PACKAGE) and p.endswith(".py"))
 
 
+def _name_digests(run: str) -> list[str]:
+    """Digests of the forbidden words contained in a run of letters, case-folded (sliding window per length)."""
+    run = run.lower()
+    hits = {
+        digest
+        for length in FORBIDDEN_NAME_LENGTHS
+        for start in range(len(run) - length + 1)
+        if (digest := hashlib.sha256(run[start : start + length].encode()).hexdigest()) in FORBIDDEN_NAME_DIGESTS
+    }
+    return sorted(hits)
+
+
 def check_generic_core(sources: Iterable[Source]) -> list[str]:
-    """C1 (R1): no tracked text file names another project; a word is checked by its SHA-256 digest."""
+    """C1 (R1): no tracked text file or path contains the name of another project; a word is found by its
+    SHA-256 digest, so the report never spells it."""
     out = []
+    cache: dict[str, list[str]] = {}  # each distinct run of letters is hashed once
+
+    def digests(text: str) -> list[str]:
+        found: dict[str, None] = {}
+        for run in dict.fromkeys(WORD_RE.findall(text)):
+            if run not in cache:
+                cache[run] = _name_digests(run)
+            found.update(dict.fromkeys(cache[run]))
+        return list(found)
+
     for path, source in sources:
-        forbidden: dict[str, bool] = {}  # each distinct word is hashed once per file
+        for digest in digests(path):
+            out.append(f"{path}: C1 name of another project in the path (digest {digest[:8]}…) (R1)")
         for number, line in enumerate(source.splitlines(), 1):
-            for word in dict.fromkeys(w.lower() for w in WORD_RE.findall(line)):
-                if word not in forbidden:
-                    forbidden[word] = hashlib.sha256(word.encode()).hexdigest() in FORBIDDEN_NAME_DIGESTS
-                if forbidden[word]:
-                    out.append(f"{path}:{number}: C1 name of another project `{word}` (R1)")
+            for digest in digests(line):
+                out.append(f"{path}:{number}: C1 name of another project (digest {digest[:8]}…) (R1)")
     return out
 
 
@@ -276,16 +299,15 @@ def run_all(files: list[str], sources: list[Source]) -> list[str]:
 
 
 def repo_inputs(repo_root: Path = REPO_ROOT) -> tuple[list[str], list[Source]]:
-    """Tracked plus untracked-but-not-ignored files that exist, and the text of every one that is UTF-8
+    """Tracked plus untracked-but-not-ignored files that exist, and the text of every non-binary one
     (C1 reads them all; the other rules pick their files by path)."""
-    listed = git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
-    files = sorted({f for f in listed if (repo_root / f).is_file()})
+    listed = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
+    files = sorted({f for f in listed if f and (repo_root / f).is_file()})
     sources = []
     for f in files:
-        try:
-            sources.append((f, (repo_root / f).read_text(encoding="utf-8")))
-        except UnicodeDecodeError:
-            continue  # a binary file holds no text to scan
+        data = (repo_root / f).read_bytes()
+        if b"\0" not in data:  # a file with a NUL byte is binary: no text to scan
+            sources.append((f, data.decode("utf-8", errors="replace")))
     return files, sources
 
 

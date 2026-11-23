@@ -246,7 +246,8 @@ confirmed MinIO image proved unavailable):
 Sign-off: the Archivum's tables and columns; whether it is its own database or a schema inside a
 consumer's (*proposed*: its own database, so one Archivum serves several projects); the artifact kinds
 (*proposed*: raw file, database dump, report, model, log); what identifies a dataset across runs; the
-connection contract; the ledger's table and step format.
+connection contract; the ledger's table and step format; how a consumer installs and upgrades the
+Archivum (*proposed*: a library call in Phase 1, a `mimiron` command in Phase 3).
 
 ### Phase 2 — Hodir
 
