@@ -82,7 +82,7 @@ Named after the keepers and watchers of Ulduar, the titan vault.
 
 | Phase | Status | Pull request |
 |---|---|---|
-| 0 — Development process | Not started | |
+| 0 — Development process | In review | [#2](https://github.com/Deluha/Project_Ulduar/pull/2) |
 | 1 — Freya | Not started | |
 | 2 — Hodir | Not started | |
 | 3 — Mimiron | Not started | |
@@ -151,6 +151,18 @@ Sign-off:
   image and a MinIO image, started by the session-start hook; the same images in CI.
 - Whether sessions install the `council-of-elrond` plugin, as Blackwing Analytics and DeveloPath do.
 - The licence (MIT today).
+
+Sign-off decisions (owner, 2026-11-22: S1–S6 confirmed; S5's object-store image chosen after the
+confirmed MinIO image proved unavailable):
+
+| # | Item | Decision |
+|---|---|---|
+| S1 | Hard rules and ask-first list | Eleven hard rules: generic core; one canonical helper; safe SQL; no unasked files; the vault is immutable; read-only towards consumers; own schema through the ledger; docs move with the code; real services in tests; one module per component with a flow-only `mimiron` entry; no secrets stored or logged. The four Blackwing operating principles unchanged. Ask-first as proposed above plus the licence and the scope rules of this file, as shown at sign-off; the guidance machinery and CI path-gated by `permissions.ask`. Text: `CLAUDE.md`. |
+| S2 | Package and layout | Distribution `project-ulduar`, import package `ulduar`, flat at the repository root; one module per component (`freya`, `hodir`, `thorim`, `algalon`); `mimiron` the only CLI entry; dev tooling in `dev_tools/`, not shipped; verify command `python dev_tools/verify.py`; Python 3.11 or newer. |
+| S3 | Blackwing conventions | The choices Caverns of Time made: icon status helpers for CLI output only, `logging` in library code, strict gating mypy, actions pinned by commit SHA, no `#%%` markers; kept with them: codenames, the single `CI gate` check, gitleaks, pre-commit, the path-rule and eval mechanisms, the `settings.json` shape and agent tiers. Ported from Caverns of Time's Phase 0, the roadmap's reference for the generic parts. |
+| S4 | Licence | MIT, unchanged. |
+| S5 | Local test services | PostgreSQL: the official `postgres:18` image. Object store: `pgsty/minio:RELEASE.2026-08-04T00-00-00Z`, a community MinIO build, pinned — the official `minio/minio` image is no longer on Docker Hub and quay.io is unreachable from cloud sessions. Both started by `python dev_tools/services.py start` (from the cloud session-start hook, locally and in CI) and as compose services in the dev container. No fallback: a service that cannot start fails its tests. |
+| S6 | `council-of-elrond` plugin | Not installed in v0.1's Phase 0; adding it later is a guidance change. |
 
 ### Phase 1 — Freya
 

@@ -1,0 +1,20 @@
+// Project Ulduar dev container (GitHub Codespaces and VS Code Dev Containers).
+// Three services (docker-compose.yml): the Python workspace, a PostgreSQL 18 test
+// instance and a MinIO test object store, all sharing one network namespace, so the
+// tests reach both on 127.0.0.1. The project installs into the image's Python with
+// the dev extra, and the git hooks are wired on create.
+{
+  "name": "Project Ulduar",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "postCreateCommand": "pip install -e '.[dev]' && pre-commit install",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff"],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  }
+}

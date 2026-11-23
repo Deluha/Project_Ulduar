@@ -1,0 +1,124 @@
+name: ci-tests
+
+# The test suite against the real local test services: a PostgreSQL 18 server and
+# an S3-compatible object store (MinIO), throwaway containers that live for the
+# job, hold no data and need no secret. They are started by the same command as in
+# development, `python dev_tools/services.py start`, which holds their images,
+# ports and throwaway credentials in one place (MinIO needs a command, which a
+# `services:` container cannot take), and their settings reach the tests through
+# `python dev_tools/services.py env`. ULDUAR_REQUIRE_SERVICES=1 turns a service
+# test that cannot connect into a failure instead of a skip, and fails a run in
+# which no database or no object-store test passed (hard rule 9). The pytest job
+# also records coverage (coverage.xml, a 14-day artifact). Two more gating jobs
+# ride along: mypy (strict; config in pyproject.toml) and actionlint over
+# .github/workflows. The final `gate` job (check name "CI gate") depends on all
+# three and stands for this workflow in branch protection, next to the checks of
+# ci-pre-commit and ci-docs-sync.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pytest:
+    name: Run tests (PostgreSQL 18, MinIO)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ULDUAR_REQUIRE_SERVICES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Start the local test services
+        run: |
+          python dev_tools/services.py start
+          python dev_tools/services.py env >> "$GITHUB_ENV"
+      - name: Install the project with the dev extra
+        run: pip install -e ".[dev]"
+      - name: Run pytest with coverage
+        run: python -m pytest -q -rs --cov=ulduar --cov=dev_tools --cov-report=xml --cov-report=term-missing:skip-covered
+      - name: Keep the coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mypy:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install the project with the dev extra
+        run: pip install -e ".[dev]"
+      - name: Run mypy
+        run: python -m mypy
+
+  actionlint:
+    name: Lint the workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      # The pin lives in pyproject.toml (Dependabot's pip entry bumps it).
+      - name: Install actionlint
+        run: pip install "$(grep -oE 'actionlint-py==[0-9.]+' pyproject.toml)"
+      # The hosted runner ships shellcheck; info-level style notes must not gate.
+      - name: Run actionlint
+        env:
+          SHELLCHECK_OPTS: --severity=warning
+        run: actionlint .github/workflows/*.yml
+
+  # One check to require for this workflow: it covers the gating jobs above, so
+  # adding or renaming one of them never touches the repository's required-check list.
+  gate:
+    name: CI gate
+    needs: [pytest, mypy, actionlint]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Results arrive through env, never interpolated into the script.
+      - name: Fail unless every needed job succeeded
+        env:
+          RESULT_PYTEST: ${{ needs.pytest.result }}
+          RESULT_MYPY: ${{ needs.mypy.result }}
+          RESULT_ACTIONLINT: ${{ needs.actionlint.result }}
+        run: |
+          status=0
+          for pair in "pytest=$RESULT_PYTEST" "mypy=$RESULT_MYPY" "actionlint=$RESULT_ACTIONLINT"; do
+            echo "${pair%%=*}: ${pair#*=}"
+            case "${pair#*=}" in
+              success) ;;
+              *) status=1 ;;
+            esac
+          done
+          exit "$status"
