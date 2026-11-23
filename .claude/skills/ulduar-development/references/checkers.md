@@ -65,6 +65,7 @@ skills, the root docs, every `README.md` up to three levels deep and the agent f
 | Single home | A rule token (`R<n>`, `C<n>`) heading a `##` / `###` section in more than one doc |
 | Rule files | A `.claude/rules/*.md` without `paths:` frontmatter, with more than 6 non-blank body lines, or without a pointer |
 | Command skills | A command skill without frontmatter or without a pointer |
+| Final newline | A scanned doc that does not end with exactly one newline |
 
 A path the docs name but that does not exist yet fails the pointer check: name a planned module in
 prose, without a backticked path, until its phase creates it.

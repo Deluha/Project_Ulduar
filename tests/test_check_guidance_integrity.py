@@ -335,6 +335,18 @@ def test_run_all_reports_second_skill_without_description(tree):
     assert _run(tree) == [".claude/skills/cmd/SKILL.md: frontmatter missing `description:`"]
 
 
+# ── final newline ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(("text", "ok"), [("# R\n", True), ("", True), ("# R", False), ("# R\n\n", False)])
+def test_final_newline_rule(tree, text, ok):
+    root, _ = tree
+    doc = _write(root / "README.md", text)
+    expected = [] if ok else ["README.md: final newline — the file must end with exactly one newline"]
+    assert gi.check_final_newline([doc], root) == expected
+    assert [v for v in _run(tree) if "final newline" in v] == expected
+
+
 # ── live repo ─────────────────────────────────────────────────────────────────
 
 

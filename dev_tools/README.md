@@ -11,7 +11,7 @@ library only, so each script runs on a bare Python. Not part of the distribution
 |---|---|---|
 | `verify.py` | `python dev_tools/verify.py [--base <ref>]` | Runs every QA step and prints one pass/fail table; requires the test services |
 | `check_conventions.py` | `python dev_tools/check_conventions.py` | Convention rules C1–C9 |
-| `check_guidance_integrity.py` | `python dev_tools/check_guidance_integrity.py` | Guidance pointers, anchors, `CLAUDE.md` budget, skill routing, rule files, command skills |
+| `check_guidance_integrity.py` | `python dev_tools/check_guidance_integrity.py` | Guidance pointers, anchors, `CLAUDE.md` budget, skill routing, rule files, command skills, final newline |
 | `check_docs_sync.py` | `python dev_tools/check_docs_sync.py --base <ref>` or `--staged <commit-msg-file>` | Fails a code change in a documented area without its doc |
 | `services.py` | `python dev_tools/services.py start \| stop \| status \| env [postgres] [object-store]` | The local test services: PostgreSQL 18 and MinIO, Docker containers on 127.0.0.1 |
 

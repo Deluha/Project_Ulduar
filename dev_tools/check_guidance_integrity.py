@@ -6,8 +6,8 @@ skill files, .claude/rules, command skills and project docs exists, and an
 budget; (3) SKILL.md frontmatter + routing reference every references/ and
 workflows/ file once; (4) a rule token (`R6`) heads a section in at most one
 doc; (5) rule files: `paths:` frontmatter, pointer-only body; (6) command
-skills: frontmatter + a pointer. Pure checks over explicit paths; main() wires
-the real repo. Stdlib only.
+skills: frontmatter + a pointer; (7) every scanned doc ends with exactly one newline. Pure checks over explicit
+paths; main() wires the real repo. Stdlib only.
 Details: the skill's references/checkers.md#checker-guidance-integrity.
 """
 
@@ -344,6 +344,19 @@ def check_command_skills(repo_root: Path = REPO_ROOT, skill_dir: Path = SKILL_DI
     return violations
 
 
+def check_final_newline(docs: list[Path], repo_root: Path = REPO_ROOT) -> list[str]:
+    """Every non-empty doc in *docs* ends with exactly one newline (`.editorconfig`:
+    `insert_final_newline`); an empty file passes, a missing one is check_doc_pointers' call."""
+    violations: list[str] = []
+    for doc in docs:
+        if not doc.exists():
+            continue
+        text = doc.read_text(encoding="utf-8")
+        if text and (not text.endswith("\n") or text.endswith("\n\n")):
+            violations.append(f"{_rel(doc, repo_root)}: final newline — the file must end with exactly one newline")
+    return violations
+
+
 def run_all(repo_root: Path = REPO_ROOT, skill_dir: Path = SKILL_DIR, claude_md: Path = CLAUDE_MD) -> list[str]:
     guidance = guidance_docs(repo_root, skill_dir, claude_md)
     docs = guidance + project_docs(repo_root)
@@ -356,6 +369,7 @@ def run_all(repo_root: Path = REPO_ROOT, skill_dir: Path = SKILL_DIR, claude_md:
         + check_single_home(docs, repo_root)
         + check_rule_files(repo_root)
         + check_command_skills(repo_root, skill_dir)
+        + check_final_newline(docs, repo_root)
     )
 
 
@@ -372,7 +386,7 @@ def main() -> int:
         return 1
     print(
         "✅ guidance stack intact (pointers + anchors, CLAUDE.md budget, "
-        "skill routing, single-home tokens, rule files, command skills)"
+        "skill routing, single-home tokens, rule files, command skills, final newline)"
     )
     return 0
 
