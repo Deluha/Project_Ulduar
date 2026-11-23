@@ -1,6 +1,6 @@
 # Project Ulduar — Roadmap
 
-The planned scope of the next release. `RELEASE_NOTES.md` (from Phase 0 on) records what shipped; this
+The planned scope of the coming releases. `RELEASE_NOTES.md` (from Phase 0 on) records what shipped; this
 file records what is planned. A release's section leaves this file when the release is tagged. Owner
 decisions are dated.
 

@@ -96,7 +96,7 @@ No workflow holds a secret, and none connects to anything but its own local test
   points · How it works · Interfaces & contracts · Extending · See also**.
 - READMEs carry local detail only — never the hard rules or CI mechanics.
 - Root `README.md` = human overview; `RELEASE_NOTES.md` = the single changelog; `ROADMAP.md` = the planned
-  next release (scope, phases, status, the phase process); its section leaves when the release is tagged;
+  releases (scope, phases, status, the phase process); a release's section leaves when it is tagged;
   `tests/README.md` = test inventory.
 - A README describes what is built. Planned behaviour belongs in `ROADMAP.md` until its phase ships.
 
