@@ -9,8 +9,8 @@ below (D1–D14). What is still marked *proposed* inside a phase is that phase's
 presented as a concrete proposal and confirmed at its sign-off. Nothing is built yet.
 
 Decided by the owner on 2026-11-23, in the planning session for Project Molten Core and DeveloPath:
-decisions D15–D19 and the personal-data release they add, whose section follows v0.1's (*proposed* name:
-v0.2 — Personal data). v0.1 stays as approved. Everything in that section beyond D15–D19 is *proposed*
+decisions D15–D21 and the personal-data release they add, whose section follows v0.1's (*proposed* name:
+v0.2 — Personal data). v0.1 stays as approved. Everything in that section beyond D15–D21 is *proposed*
 until the owner confirms it.
 
 ## v0.1 — A vault and observatory for data projects
@@ -80,6 +80,9 @@ Named after the keepers and watchers of Ulduar, the titan vault.
 - **Not a backup system of record (D13).** Hodir archives logical dumps and files and proves they can be
   restored. Point-in-time recovery (the pgBackRest plans of Blackwing Analytics and DeveloPath) stays
   with each product.
+  *Amended 2026-11-23 (D20):* point-in-time recovery now sits with Project Molten Core for the
+  applications it operates; a restore verification that needs plaintext runs inside the realm, not in
+  Ulduar.
 - **No personal data in v0.1 (D14).** The first consumer's data is football statistics. Archiving data about
   academy players or staff (DeveloPath) needs encryption, retention and erasure rules first: see Later.
   *Amended 2026-11-23 (D17):* holds for v0.1 as written; lifted only for the personal-data release
@@ -277,9 +280,9 @@ above Blackwing adopts first; the read-only database role Ulduar connects with.
   Project Molten Core (D15–D17): the required encryption, per-tenant separation, retention and erasure
   rules its personal data needs are the personal-data release below (*proposed* name: v0.2 — Personal
   data), with the retention numbers a matter for the consumer and its counsel.
-- The home for the shared operations modules (Terraform, VPN, alert routing), which DeveloPath's D-42 and
-  Blackwing Analytics' D-47 placed differently, is Project Molten Core (owner decision, 2026-11-23). None
-  of it is built in this repository.
+- The home for DeveloPath's operations modules (Terraform, VPN, alert routing) is Project Molten Core
+  (D21). Where Blackwing Analytics' D-47 places its own stays an owner decision in that repository; not
+  proposed here. None of it is built in this repository.
 - Column-level lineage; statistical anomaly detection beyond declared ranges and tolerances.
 - More connectors (an HTTP API source, a second database engine); a PostgreSQL version matrix.
 
@@ -293,14 +296,15 @@ recorded. Project Molten Core is the first consumer, not the design target. v0.1
 no personal data (D14).
 
 The name and number of this release, its phase numbers and everything in this section beyond the owner
-decisions D15–D19 are *proposed*: the starting position, to be confirmed by the owner in the review of
+decisions D15–D21 are *proposed*: the starting position, to be confirmed by the owner in the review of
 the pull request that added this section or at a phase's sign-off. A confirmed item loses its *proposed*
 mark and is recorded here, dated; a confirmed scope rule takes a D number. A merge alone confirms none of
 them. Nothing is built yet.
 
 ### Owner decisions (2026-11-23)
 
-Taken in the planning session for Project Molten Core and DeveloPath. Sources:
+D15–D19 were taken in the planning session for Project Molten Core and DeveloPath; D20 and D21 were
+confirmed the same day in the review of the pull request that added this section. Sources:
 [Project Molten Core #1](https://github.com/Deluha/Project_Molten_Core/pull/1) and
 [DeveloPath #15](https://github.com/Deluha/DeveloPath/pull/15).
 
@@ -325,12 +329,17 @@ Taken in the planning session for Project Molten Core and DeveloPath. Sources:
   bucket and its own storage credential — so one environment's credential cannot reach another's
   backups. The Archivum (catalog and run ledger) lives in Molten Core's management realm and holds
   metadata only.
+- **Point-in-time recovery and plaintext restore checks (D20).** Point-in-time recovery now sits with
+  Project Molten Core for the applications it operates; a restore verification that needs plaintext runs
+  inside the realm, not in Ulduar. Recorded as a dated note on D13.
+- **Home of DeveloPath's operations modules (D21).** Project Molten Core is the home for DeveloPath's
+  operations modules (Terraform, VPN, alert routing). Blackwing Analytics is not decided here.
 
 ### Scope rules (*proposed*, to be confirmed by the owner)
 
 They restate the constraints of the consumers' plans (the two pull requests above). D1–D13 bind this
-release. P9 names the two places where D15 and P2 change how D13 reads; where the reading of another rule
-is open (D6 in Phase 7, D7 in Phase 9, D2 in Phase 11), that phase's sign-off says so.
+release, D13 with its note of 2026-11-23 (D20); where the reading of another rule is open (D6 in Phase 7,
+D7 in Phase 9, D2 in Phase 11), that phase's sign-off says so.
 
 - **Ciphertext only (P1).** A dump is encrypted on the database host before it leaves, one recipient key
   per database. Ulduar receives, stores, checksums and verifies ciphertext; it never holds, reads or is
@@ -370,14 +379,12 @@ is open (D6 in Phase 7, D7 in Phase 9, D2 in Phase 11), that phase's sign-off sa
   holds personal data carry identifiers, states, times, counts, sizes and checksums — never a person's
   name or record contents. Molten Core applies the same rule to hook output and metric labels. A tenant
   is an opaque identifier issued by the consumer.
-- **Boundaries unchanged (P9).** The boundaries of D6, D11 and D13 hold. Two readings of D13 change
-  without changing its text: point-in-time recovery stays with pgBackRest, now operated by Molten Core
-  rather than by each product (D15); and for a personal-data class the proof that a dump restores is
-  reported from the realm (P2), not produced by Hodir. No test, workflow or development session of this
-  repository touches a realm; tests use synthetic ciphertext on the local test services (D10). The
-  package fixes two roles only — the storage boundary (one bucket, one credential) and the unit of
-  separation — and learns from configuration which of a consumer's scopes fill them; "realm" and
-  "tenant" in this section are Molten Core's names for them, never names in the package (D5).
+- **Boundaries unchanged (P9).** The boundaries of D6, D11 and D13 hold, D13 as amended by its note
+  (D20). No test, workflow or development session of this repository touches a realm; tests use synthetic
+  ciphertext on the local test services (D10). The package fixes two roles only — the storage boundary
+  (one bucket, one credential) and the unit of separation — and learns from configuration which of a
+  consumer's scopes fill them; "realm" and "tenant" in this section are Molten Core's names for them,
+  never names in the package (D5).
 
 ### Status
 
