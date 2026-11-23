@@ -80,11 +80,11 @@
       "expect_mentions": ["sign-off", "R10"]
     },
     {
-      "id": "route-sql-identifier",
+      "id": "gate-sql-identifier-early",
       "prompt": "Write a helper that counts the rows of a table the caller names, for Thorim's measurements.",
       "expect_reads": ["references/conventions.md"],
-      "expect_stops_to_ask": false,
-      "expect_mentions": ["R3", "identifier quoting"]
+      "expect_stops_to_ask": true,
+      "expect_mentions": ["R3", "identifier quoting", "Phase 4"]
     },
     {
       "id": "gate-guidance-budget",
