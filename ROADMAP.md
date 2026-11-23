@@ -11,16 +11,9 @@ presented as a concrete proposal and confirmed at its sign-off. Nothing is built
 Decided by the owner on 2026-11-23, in the planning session for Project Molten Core and DeveloPath and in
 the review of the pull request that followed: decisions D15–D23 and the personal-data release they add,
 whose section follows v0.1's (*proposed* name: v0.2 — Personal data). v0.1 stays as approved. Everything
-in that section beyond D15–D23 is *proposed* until the owner confirms it.
+in that section is *proposed* until the owner confirms it, unless it restates one of those decisions.
 
-## v0.1 — A vault and observatory for data projects
-
-Goal: a generic Python library and CLI that gives a data project a vault and someone watching it — an
-immutable archive of what went in and what came out, a catalog of what exists and where it came from,
-a record of every run, and a verdict on whether the data is fresh, complete and recoverable. Project
-Blackwing is the first consumer, not the design target.
-
-### Why
+## Why
 
 Findings of the 2026-11-22 survey of the sibling repositories:
 
@@ -32,7 +25,7 @@ Findings of the 2026-11-22 survey of the sibling repositories:
 | Catalog and lineage | None in any repository. |
 | Blackwing Analytics, DeveloPath | Backups, alerting and audit are planned in each, built in neither. *2026-11-23:* DeveloPath's are now part of Project Molten Core's plan (D15). |
 
-### Components
+## Components
 
 Named after the keepers and watchers of Ulduar, the titan vault.
 
@@ -43,6 +36,11 @@ Named after the keepers and watchers of Ulduar, the titan vault.
 | **Thorim** | Keeper of storms, master of the Arena | Run ledger: every run with its status, timings, row counts and check results, linked to what it read and wrote. |
 | **Algalon** | The Observer, who judges whether a world still stands | Monitoring: judges freshness, missed runs, volume drift, backup age and archive integrity from what the other three recorded; reports a verdict and raises alerts. |
 | **Mimiron** | The tinkerer | The `mimiron` CLI, the connectors (a directory, `pg_dump`, Google Drive) and the GitHub Action a consumer's workflow calls. |
+
+## Owner decisions and scope rules
+
+The permanent section (D22): decisions stay here, in number order, when a release's section leaves
+this file. A dated note amends a decision; its original text is kept.
 
 ### Scope rules (owner decisions, 2026-11-22)
 
@@ -87,19 +85,73 @@ Named after the keepers and watchers of Ulduar, the titan vault.
   *Amended 2026-11-23 (D17):* holds for v0.1 as written; lifted only for the personal-data release
   (*proposed* name: v0.2 — Personal data), below.
 
-### Status
+### Owner decisions (2026-11-23)
 
-| Phase | Status | Pull request |
-|---|---|---|
-| 0 — Development process | In review | [#2](https://github.com/Deluha/Project_Ulduar/pull/2) |
-| 1 — Freya | Not started | |
-| 2 — Hodir | Not started | |
-| 3 — Mimiron | Not started | |
-| 4 — Thorim | Not started | |
-| 5 — Algalon | Not started | |
-| 6 — Blackwing adoption and release | Not started | |
+D15–D19 were taken in the planning session for Project Molten Core and DeveloPath; D20–D23 were confirmed
+the same day in the review of the pull request that added the personal-data release. Sources:
+[Project Molten Core #1](https://github.com/Deluha/Project_Molten_Core/pull/1) and
+[DeveloPath #15](https://github.com/Deluha/DeveloPath/pull/15).
 
-### Running a phase
+- **Project Molten Core (D15).** `Deluha/Project_Molten_Core` is the owner's operations platform: it
+  deploys the owner's applications, maintains their PostgreSQL servers and backups, and collects logs
+  and metrics, on servers at Hetzner. DeveloPath (a multi-tenant platform for football academies,
+  holding minors' personal and special-category data) is its first application; DeveloPath's
+  infrastructure moved out of DeveloPath into Molten Core.
+- **Molten Core uses Ulduar in full (D16).** Thorim records every operations job as a run; Freya
+  catalogs dumps and reports; Hodir archives database dumps and collected logs with integrity
+  verification; Algalon judges backup age, missed schedules and overdue restore drills, shown in
+  Molten Core's console.
+- **A personal-data release (D17).** That use includes dumps of applications that hold personal data.
+  Before any such data is archived, Ulduar needs required client-side encryption, per-tenant
+  separation, declared retention, and recorded deletion and erasure. This release is added to the
+  roadmap for them, and D14 is lifted only for it.
+- **Not on the critical path (D18).** Molten Core writes dumps, encrypted on the database host, to each
+  realm's own object-locked bucket first; the hand-over to Ulduar's archive is switched on per realm
+  later and is never a condition for a realm to hold real data. Ulduar blocks no consumer.
+- **The archive is per realm (D19).** A realm is one environment of one application (for example
+  `developath/uat`). Each realm's archived objects live in that realm's own backup project — its own
+  bucket and its own storage credential — so one environment's credential cannot reach another's
+  backups. The Archivum (catalog and run ledger) lives in Molten Core's management realm and holds
+  metadata only.
+- **Point-in-time recovery and plaintext restore checks (D20).** Point-in-time recovery now sits with
+  Project Molten Core, not with each product; a restore check that needs plaintext runs inside the
+  consumer's realm, never in Ulduar. Recorded as a dated note on D13.
+- **Home of DeveloPath's operations modules (D21).** Project Molten Core is the home for DeveloPath's
+  operations modules (Terraform, VPN, alert routing). Blackwing Analytics is not decided here.
+- **Scope rules outlive v0.1 (D22).** The scope rules D1–D14 with their dated notes live in a permanent
+  section of this file and do not leave with the v0.1 section. Phase 6's release row is amended
+  accordingly. The roadmap was restructured on 2026-11-23 so that this section is that permanent one.
+- **The consumers' constraints are decided (D23).** What the two plans require of this release is
+  decided, not proposed (Project Molten Core's owner decisions O1–O9, DeveloPath's O37–O48): dumps reach
+  Ulduar as ciphertext only, with the private keys on the realm's database host and in an offline escrow,
+  never in the management realm and never available to Ulduar; the consumer's post-restore step runs
+  after every path that brings back older data, an archive restore verification included, before the data
+  is used for anything, and Ulduar never applies erasure or needs plaintext to honour it; retention comes
+  from the consumer's manifest and applies to every archived copy; an offboarded tenant's copies age out;
+  deleting a key is never reported as erasure, and an erasure or offboarding certificate uses the longest
+  retention among backup lock, dumps and archived copies; what Ulduar stores about a consumer carries
+  identifiers, states, counts, sizes and checksums only, never names or record contents; legal
+  classification and retention numbers stay with the consumer and its counsel. The scope rules P1–P9
+  restate them.
+
+## Status
+
+| Phase | Release | Status | Pull request |
+|---|---|---|---|
+| 0 — Development process | v0.1 | In review | [#2](https://github.com/Deluha/Project_Ulduar/pull/2) |
+| 1 — Freya | v0.1 | Not started | |
+| 2 — Hodir | v0.1 | Not started | |
+| 3 — Mimiron | v0.1 | Not started | |
+| 4 — Thorim | v0.1 | Not started | |
+| 5 — Algalon | v0.1 | Not started | |
+| 6 — Blackwing adoption and release | v0.1 | Not started | |
+| 7 — Scopes and the catalog | v0.2 (*proposed*) | Not started | |
+| 8 — Ciphertext and separation | v0.2 (*proposed*) | Not started | |
+| 9 — Retention, deletion and erasure | v0.2 (*proposed*) | Not started | |
+| 10 — Operations runs and verdicts | v0.2 (*proposed*) | Not started | |
+| 11 — Molten Core adoption and release | v0.2 (*proposed*) | Not started | |
+
+## Running a phase
 
 One development session per phase, in order. A phase starts only when the previous phase's pull request
 is merged. Kick-off prompt: "Implement Phase N of `ROADMAP.md` following its Running a phase section."
@@ -117,6 +169,19 @@ is merged. Kick-off prompt: "Implement Phase N of `ROADMAP.md` following its Run
    entry and removes the v0.1 section from this file.
 6. **Stay in scope.** The scope rules bind every phase. A phase that finds an agreed item infeasible, or
    needs something not listed here, stops and asks the owner; it never narrows or widens scope itself.
+
+The steps name v0.1; for v0.2 the release-notes section is "v0.2.0 — in development", and Phase 11
+turns it into the release entry and removes the v0.2 section from this file. *Proposed*: Phase 7 starts
+only when v0.1.0 is tagged. Phases 7–10 change ask-first items of `CLAUDE.md` (the Archivum schema, the
+object layout, the CLI and configuration surface, archive deletion and retention); a phase's sign-off is
+where the owner confirms them.
+
+## v0.1 — A vault and observatory for data projects
+
+Goal: a generic Python library and CLI that gives a data project a vault and someone watching it — an
+immutable archive of what went in and what came out, a catalog of what exists and where it came from,
+a record of every run, and a verdict on whether the data is fresh, complete and recoverable. Project
+Blackwing is the first consumer, not the design target.
 
 ### Phase 0 — Development process
 
@@ -259,7 +324,7 @@ issue format and labels.
 |---|---|
 | 1 | Adoption guide: installing the package, the configuration file, the storage and database a consumer provides. |
 | 2 | End-to-end test: a sample consumer project archived, recorded and observed through its configuration alone. |
-| 3 | v0.1.0 release: version, release notes, this section removed — except the scope rules D1–D14 with their dated notes, which move to a permanent section of this file (owner decision, 2026-11-23, D22). |
+| 3 | v0.1.0 release: version, release notes, this section removed; the scope rules D1–D14 with their dated notes stay in the permanent section (owner decision, 2026-11-23, D22). |
 
 The Blackwing side is a separate pull request in `Deluha/Project_Blackwing`, under that repository's own
 rules: its workflows and anything that reaches its database are ask-first items there. Candidates, in
@@ -271,20 +336,6 @@ Sign-off: how Blackwing installs the package (git dependency or a package index)
 which database host the Archivum and the archive use, and who pays for them; which of the candidates
 above Blackwing adopts first; the read-only database role Ulduar connects with.
 
-### Later (not in v0.1)
-
-- A read-only web view and an HTTP API over the Archivum (D2). Project Molten Core's console is the
-  first consumer that would show Ulduar's verdicts (D16); still later, still an owner decision.
-- Adoption by Blackwing Analytics once its hosting phase exists. DeveloPath's data reaches Ulduar through
-  Project Molten Core (D15–D17): the required encryption, per-tenant separation, retention and erasure
-  rules its personal data needs are the personal-data release below (*proposed* name: v0.2 — Personal
-  data), with the retention numbers a matter for the consumer and its counsel.
-- The home for DeveloPath's operations modules (Terraform, VPN, alert routing) is Project Molten Core
-  (D21). Where Blackwing Analytics' D-47 places its own stays an owner decision in that repository; not
-  proposed here. None of it is built in this repository.
-- Column-level lineage; statistical anomaly detection beyond declared ranges and tolerances.
-- More connectors (an HTTP API source, a second database engine); a PostgreSQL version matrix.
-
 ## v0.2 — Personal data
 
 Goal: let a consumer archive, catalog and observe data that holds personal data — first the database
@@ -294,62 +345,13 @@ copies separable where the consumer declares a tenant, every copy under a declar
 deletion recorded. Project Molten Core is the first consumer, not the design target. v0.1 stays as
 approved, with no personal data (D14).
 
-The name and number of this release, its phase numbers and everything in this section beyond the owner
-decisions D15–D23 are *proposed*: the starting position, to be confirmed by the owner in the review of
-the pull request that added this section or at a phase's sign-off. A confirmed item loses its *proposed*
-mark and is recorded here, dated; a confirmed scope rule takes a D number. A merge alone confirms none of
-them. Nothing is built yet.
+The name and number of this release, its phase numbers and everything in this section that does not
+restate an owner decision (D15–D23) are *proposed*: the starting position, to be confirmed by the owner
+in the review of the pull request that added this section or at a phase's sign-off. A confirmed item
+loses its *proposed* mark and is recorded, dated; a confirmed scope rule takes a D number and moves to
+the permanent section. A merge alone confirms none of them. Nothing is built yet.
 
-### Owner decisions (2026-11-23)
-
-D15–D19 were taken in the planning session for Project Molten Core and DeveloPath; D20–D23 were confirmed
-the same day in the review of the pull request that added this section. Sources:
-[Project Molten Core #1](https://github.com/Deluha/Project_Molten_Core/pull/1) and
-[DeveloPath #15](https://github.com/Deluha/DeveloPath/pull/15).
-
-- **Project Molten Core (D15).** `Deluha/Project_Molten_Core` is the owner's operations platform: it
-  deploys the owner's applications, maintains their PostgreSQL servers and backups, and collects logs
-  and metrics, on servers at Hetzner. DeveloPath (a multi-tenant platform for football academies,
-  holding minors' personal and special-category data) is its first application; DeveloPath's
-  infrastructure moved out of DeveloPath into Molten Core.
-- **Molten Core uses Ulduar in full (D16).** Thorim records every operations job as a run; Freya
-  catalogs dumps and reports; Hodir archives database dumps and collected logs with integrity
-  verification; Algalon judges backup age, missed schedules and overdue restore drills, shown in
-  Molten Core's console.
-- **A personal-data release (D17).** That use includes dumps of applications that hold personal data.
-  Before any such data is archived, Ulduar needs required client-side encryption, per-tenant
-  separation, declared retention, and recorded deletion and erasure. This release is added to the
-  roadmap for them, and D14 is lifted only for it.
-- **Not on the critical path (D18).** Molten Core writes dumps, encrypted on the database host, to each
-  realm's own object-locked bucket first; the hand-over to Ulduar's archive is switched on per realm
-  later and is never a condition for a realm to hold real data. Ulduar blocks no consumer.
-- **The archive is per realm (D19).** A realm is one environment of one application (for example
-  `developath/uat`). Each realm's archived objects live in that realm's own backup project — its own
-  bucket and its own storage credential — so one environment's credential cannot reach another's
-  backups. The Archivum (catalog and run ledger) lives in Molten Core's management realm and holds
-  metadata only.
-- **Point-in-time recovery and plaintext restore checks (D20).** Point-in-time recovery now sits with
-  Project Molten Core, not with each product; a restore check that needs plaintext runs inside the
-  consumer's realm, never in Ulduar. Recorded as a dated note on D13.
-- **Home of DeveloPath's operations modules (D21).** Project Molten Core is the home for DeveloPath's
-  operations modules (Terraform, VPN, alert routing). Blackwing Analytics is not decided here.
-- **Scope rules outlive v0.1 (D22).** When v0.1 is tagged, the scope rules D1–D14 with their dated notes
-  move to a permanent section of this file instead of leaving with the v0.1 section. Phase 6's release
-  row is amended accordingly; this decision changes nothing else of v0.1's approved text.
-- **The consumers' constraints are decided (D23).** What the two plans require of this release is
-  decided, not proposed (Project Molten Core's owner decisions O1–O9, DeveloPath's O37–O48): dumps reach
-  Ulduar as ciphertext only, with the private keys on the realm's database host and in an offline escrow,
-  never in the management realm and never available to Ulduar; the consumer's post-restore step runs
-  after every path that brings back older data, an archive restore verification included, before the data
-  is used for anything, and Ulduar never applies erasure or needs plaintext to honour it; retention comes
-  from the consumer's manifest and applies to every archived copy; an offboarded tenant's copies age out;
-  deleting a key is never reported as erasure, and an erasure or offboarding certificate uses the longest
-  retention among backup lock, dumps and archived copies; what Ulduar stores about a consumer carries
-  identifiers, states, counts, sizes and checksums only, never names or record contents; legal
-  classification and retention numbers stay with the consumer and its counsel. The scope rules below
-  restate them.
-
-### Scope rules
+### Scope rules for personal data (P1–P9)
 
 They restate the consumers' constraints, which are decided (D23). What a rule adds beyond them is marked
 *proposed* and is confirmed by the owner at the phase sign-off that names it. D1–D13 bind this release,
@@ -408,26 +410,6 @@ Phase 11), that phase's sign-off says so.
   boundary (one bucket, one credential) and the unit of separation — and learns from configuration which
   of a consumer's scopes fill them; "realm" and "tenant" in this section are Molten Core's names for
   them, never names in the package (D5).
-
-### Status
-
-| Phase | Status | Pull request |
-|---|---|---|
-| 7 — Scopes and the catalog | Not started | |
-| 8 — Ciphertext and separation | Not started | |
-| 9 — Retention, deletion and erasure | Not started | |
-| 10 — Operations runs and verdicts | Not started | |
-| 11 — Molten Core adoption and release | Not started | |
-
-### Running a phase
-
-As v0.1's Running a phase section, with "v0.2.0 — in development" as the release-notes section; Phase 11
-turns it into the release entry and removes this section. *Proposed*: Phase 7 starts only when v0.1.0 is
-tagged. The scope rules D1–D14 move to a permanent section then (D22); *proposed*: the Running a phase
-steps and the Later list move here at the same time. *Proposed*: when v0.2 is tagged, D15–D23 join D1–D14
-in that permanent section, since the notes on D13 and D14 cite them. Phases 7–10 change ask-first items
-of `CLAUDE.md` (the Archivum schema, the object layout, the CLI and configuration surface, archive
-deletion and retention); a phase's sign-off is where the owner confirms them.
 
 ### Phase 7 — Scopes and the catalog
 
@@ -524,3 +506,19 @@ and storage credential; which of the candidates above Molten Core adopts first; 
 realm (D2 names a consumer's GitHub Actions; Molten Core's jobs run on its own servers); whether CI also
 tests Python 3.13, Molten Core's stack (*proposed*: yes — the package requires Python 3.11 or newer,
 which does not exclude it).
+
+## Later
+
+In no planned release; each is an owner decision when its time comes.
+
+- A read-only web view and an HTTP API over the Archivum (D2). Project Molten Core's console is the
+  first consumer that would show Ulduar's verdicts (D16); still later, still an owner decision.
+- Adoption by Blackwing Analytics once its hosting phase exists. DeveloPath's data reaches Ulduar through
+  Project Molten Core (D15–D17): the required encryption, per-tenant separation, retention and erasure
+  rules its personal data needs are the personal-data release (*proposed* name: v0.2 — Personal
+  data), with the retention numbers a matter for the consumer and its counsel.
+- The home for DeveloPath's operations modules (Terraform, VPN, alert routing) is Project Molten Core
+  (D21). Where Blackwing Analytics' D-47 places its own stays an owner decision in that repository; not
+  proposed here. None of it is built in this repository.
+- Column-level lineage; statistical anomaly detection beyond declared ranges and tolerances.
+- More connectors (an HTTP API source, a second database engine); a PostgreSQL version matrix.
