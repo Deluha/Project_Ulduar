@@ -1,12 +1,16 @@
 # Project Ulduar — Roadmap
 
-The planned scope of the next release. `RELEASE_NOTES.md` (from Phase 0 on) records what shipped; this
+The planned scope of the coming releases. `RELEASE_NOTES.md` (from Phase 0 on) records what shipped; this
 file records what is planned. A release's section leaves this file when the release is tagged. Owner
 decisions are dated.
 
 Approved by the owner on 2026-11-22: the concept, the form, the process timing and every scope rule
 below (D1–D14). What is still marked *proposed* inside a phase is that phase's starting position,
 presented as a concrete proposal and confirmed at its sign-off. Nothing is built yet.
+
+Decided by the owner on 2026-11-23, in the planning session for Project Molten Core and DeveloPath:
+decisions D15–D19 and the personal-data release they add (v0.2, after v0.1 below). v0.1 stays as
+approved. Everything in the v0.2 section beyond D15–D19 is *proposed* until the owner confirms it.
 
 ## v0.1 — A vault and observatory for data projects
 
@@ -25,7 +29,7 @@ Findings of the 2026-11-22 survey of the sibling repositories:
 | Archive | Its database dumps live 14 days as CI artifacts; Google Drive holds the only copy of the raw files; reports and trained models are not kept. |
 | Monitoring | Freshness is printed, never judged; nothing checks volume drift or missed runs; no dump has its restore verified. |
 | Catalog and lineage | None in any repository. |
-| Blackwing Analytics, DeveloPath | Backups, alerting and audit are planned in each, built in neither. |
+| Blackwing Analytics, DeveloPath | Backups, alerting and audit are planned in each, built in neither. *2026-11-23:* DeveloPath's now live in Project Molten Core's plan (D15). |
 
 ### Components
 
@@ -77,6 +81,7 @@ Named after the keepers and watchers of Ulduar, the titan vault.
   with each product.
 - **No personal data in v0.1 (D14).** The first consumer's data is football statistics. Archiving data about
   academy players or staff (DeveloPath) needs encryption, retention and erasure rules first: see Later.
+  *Amended 2026-11-23 (D17):* holds for v0.1 as written; lifted only for v0.2 — Personal data, below.
 
 ### Status
 
@@ -264,11 +269,200 @@ above Blackwing adopts first; the read-only database role Ulduar connects with.
 
 ### Later (not in v0.1)
 
-- A read-only web view and an HTTP API over the Archivum (D2).
-- Adoption by Blackwing Analytics and DeveloPath once their hosting phases exist. DeveloPath holds
-  personal data of academy players: required encryption, per-tenant separation, retention and erasure
-  rules, with the retention numbers a matter for counsel as in that repository.
-- A home for the shared operations modules (Terraform, VPN, alert routing) that DeveloPath's D-42 and
-  Blackwing Analytics' D-47 place differently. An owner decision in those repositories; not proposed here.
+- A read-only web view and an HTTP API over the Archivum (D2). Project Molten Core's console is the
+  first consumer that would show Ulduar's verdicts (D16); still later, still an owner decision.
+- Adoption by Blackwing Analytics once its hosting phase exists. DeveloPath's data reaches Ulduar
+  through Project Molten Core (D15–D17): the required encryption, per-tenant separation, retention and
+  erasure rules its personal data needs are v0.2 — Personal data, below, with the retention numbers a
+  matter for the consumer and its counsel.
+- The home for the shared operations modules (Terraform, VPN, alert routing), which DeveloPath's D-42
+  and Blackwing Analytics' D-47 placed differently, is Project Molten Core (owner decision,
+  2026-11-23, D15). None of it is built in this repository.
 - Column-level lineage; statistical anomaly detection beyond declared ranges and tolerances.
 - More connectors (an HTTP API source, a second database engine); a PostgreSQL version matrix.
+
+## v0.2 — Personal data
+
+Goal: let a consumer archive, catalog and observe data that holds personal data — first the database
+dumps and collected logs of the applications Project Molten Core operates — without Ulduar ever seeing
+plaintext, with every tenant's copies separable, every copy under a declared retention, and every
+deletion recorded. Project Molten Core is the first consumer, not the design target. v0.1 stays as
+approved, with no personal data (D14).
+
+The name and number of this release, its phase numbers and everything in this section beyond the owner
+decisions D15–D19 are *proposed*: the starting position, confirmed by the owner in the review of the
+pull request that added this section and at each phase's sign-off. Nothing is built yet.
+
+### Owner decisions (2026-11-23)
+
+Taken in the planning session for Project Molten Core and DeveloPath. Sources:
+[Project Molten Core #1](https://github.com/Deluha/Project_Molten_Core/pull/1) and
+[DeveloPath #15](https://github.com/Deluha/DeveloPath/pull/15).
+
+- **Project Molten Core (D15).** `Deluha/Project_Molten_Core` is the owner's operations platform: it
+  deploys the owner's applications, maintains their PostgreSQL servers and backups, and collects logs
+  and metrics, on servers at Hetzner. DeveloPath (a multi-tenant platform for football academies,
+  holding minors' personal and special-category data) is its first application; DeveloPath's
+  infrastructure moved out of DeveloPath into Molten Core.
+- **Molten Core uses Ulduar in full (D16).** Thorim records every operations job as a run; Freya
+  catalogs dumps and reports; Hodir archives database dumps and collected logs with integrity
+  verification; Algalon judges backup age, missed schedules and overdue restore drills, shown in
+  Molten Core's console.
+- **A personal-data release (D17).** That use includes dumps of applications that hold personal data.
+  Before any such data is archived, Ulduar needs required client-side encryption, per-tenant
+  separation, declared retention, and recorded deletion and erasure. This release is added to the
+  roadmap for them, and D14 is lifted only for it.
+- **Not on the critical path (D18).** Molten Core writes dumps, encrypted on the database host, to each
+  realm's own object-locked bucket first; the hand-over to Ulduar's archive is switched on per realm
+  when Ulduar is ready. This release blocks neither Molten Core nor DeveloPath.
+- **The archive is per realm (D19).** A realm is one environment of one application (for example
+  `developath/uat`). Each realm's archived objects live in that realm's own backup project — its own
+  bucket and its own storage credential — so one environment's credential cannot reach another's
+  backups. The Archivum (catalog and run ledger) lives in Molten Core's management realm and holds
+  metadata only.
+
+### Scope rules (*proposed*, to be confirmed by the owner)
+
+They restate the constraints of the consumers' plans (the two pull requests above). Each becomes a
+dated owner decision with a D number when confirmed. D1–D13 bind this release as written.
+
+- **Ciphertext only (P1).** A dump is encrypted on the database host before it leaves, one recipient
+  key per database. Ulduar receives, stores, checksums and verifies ciphertext; it never holds, reads
+  or is configured with a private key — those stay in the realm and in an offline escrow. Hodir refuses
+  an object of a personal-data class that is not declared encrypted.
+- **Integrity on ciphertext, plaintext in the realm (P2).** Hodir's checksum and verification work on
+  ciphertext. A restore verification that needs plaintext runs inside the realm, never in Ulduar: the
+  consumer reports its outcome, Thorim records it and Algalon judges its age. The application's own
+  post-restore step (for DeveloPath: applying its erasure ledger) runs before restored data is used
+  for anything; it is the consumer's step, which Ulduar records as reported and never performs. The
+  restore drill of v0.1's Phase 5 does not run on a personal-data class.
+- **Per-realm archive, metadata-only Archivum (P3).** The storage configuration names one bucket and
+  one credential per realm (D19); no configuration gives one credential reach into two realms.
+  Credentials arrive from the environment at run time (D12).
+- **Per-tenant separation (P4).** The object key layout and the catalog carry realm, database and,
+  where the consumer declares one, tenant, so one tenant's copies can be listed, aged out and deleted
+  without touching another's. The content address is scoped inside that prefix: an identical object
+  is never shared across tenants or realms.
+- **Declared retention on every copy (P5).** The consumer declares a retention for each class
+  (DeveloPath's declaration: per-database dumps 14 days, logs 30 days) and it applies to every archived
+  copy. No default: a personal-data class without a declared retention is refused. Deletion happens
+  only by the declared rule and is itself recorded (D7). The numbers are the consumer's and its
+  counsel's; Ulduar invents none.
+- **Deleting a key is never erasure (P6).** Erasure means the copies aged out by retention or were
+  deleted by a recorded rule; Ulduar never reports the deletion of an encryption key as erasure. An
+  erasure or offboarding certificate is issued by the consumer and uses the longest retention among
+  its copies; Ulduar supplies the recorded evidence, not the certificate or any legal text.
+- **Offboarding (P7).** When a consumer reports a tenant as offboarded, that tenant's archived copies
+  age out or are deleted by a recorded rule, without touching other tenants (P4).
+- **No personal data in the catalog or the run ledger (P8).** Catalog and run records carry
+  identifiers, states, counts, sizes and checksums — never names or record contents, the rule Molten
+  Core applies to hook output and metric labels. A tenant is an opaque identifier issued by the
+  consumer.
+- **Boundaries unchanged (P9).** D6, D11 and D13 hold as written. Ulduar is not the backup system of
+  record: point-in-time recovery stays with pgBackRest, now operated by Molten Core rather than by each
+  product (D15). No test, workflow or development session of this repository touches a realm; tests
+  use synthetic ciphertext on the local test services (D10). Realm and tenant enter the package as
+  configured scopes, never as a consumer's name (D5).
+
+### Status
+
+| Phase | Status | Pull request |
+|---|---|---|
+| 7 — Scopes and the catalog | Not started | |
+| 8 — Ciphertext and separation | Not started | |
+| 9 — Retention, deletion and erasure | Not started | |
+| 10 — Operations runs and verdicts | Not started | |
+| 11 — Molten Core adoption and release | Not started | |
+
+### Running a phase
+
+As v0.1's Running a phase section, with "v0.2.0 — in development" as the release-notes section;
+Phase 11 turns it into the release entry and removes this section. *Proposed*: Phase 7 starts only
+when v0.1.0 is tagged, and the Running a phase steps move here when v0.1's section leaves this file.
+Every phase below changes ask-first items of `CLAUDE.md` (the Archivum schema, the object layout, the
+CLI and configuration surface, archive deletion and retention); its sign-off is where the owner
+confirms them.
+
+### Phase 7 — Scopes and the catalog
+
+| Commit | Content |
+|---|---|
+| 1 | Configuration: realm and tenant scopes; one storage configuration per realm, each with its own credential from the environment. |
+| 2 | Archivum schema change through the ledger: scope, data class and the declared encryption of an artifact. |
+| 3 | Field rule: the catalog and run records of a personal-data project accept identifiers, states, counts, sizes and checksums only; enforced and tested. |
+| 4 | Docs and release-notes entry. |
+
+Sign-off: what the catalog may store (*proposed*: the P8 list, plus realm, database, an opaque tenant
+identifier, the data class, the encryption format and the public recipient-key identifier; no free
+text on a personal-data project); the per-realm storage configuration and how a credential is named
+per realm; what the package calls a realm and a tenant; where the Archivum runs in the management
+realm and which roles reach it; whether an opaque tenant identifier is itself treated as personal data.
+
+### Phase 8 — Ciphertext and separation
+
+| Commit | Content |
+|---|---|
+| 1 | Object key layout with the realm, database and tenant prefix; the content address scoped inside it. |
+| 2 | Required encryption: put refuses an object of a personal-data class that is not declared encrypted; Hodir never decrypts. |
+| 3 | Get and verify on ciphertext: the checksum is of the stored bytes; get returns ciphertext only. |
+| 4 | Docs and release-notes entry. |
+
+Sign-off: the encryption scheme the consumer uses and whether Ulduar ever handles keys (*proposed*:
+never — neither private nor public; it records only the format and the recipient-key identifier the
+consumer declares); how Hodir recognises ciphertext (*proposed*: the declared format plus a check of
+the format's header, no decryption); the per-tenant object-key layout; how a copy that holds several
+tenants' data is recorded (*proposed*: as shared — it cannot be separated and ages out by its class);
+whether collected logs are a personal-data class (*proposed*: yes, unless the consumer declares
+otherwise); what is required of a realm's bucket (versioning, object lock) and how a lock period
+relates to the declared retention.
+
+### Phase 9 — Retention, deletion and erasure
+
+| Commit | Content |
+|---|---|
+| 1 | Required retention: a personal-data class without a declared retention is refused; the rule applies to every archived copy. |
+| 2 | Recorded deletion: the record of what was deleted, by which rule, when and in which run, keeping the identifier, checksum and size and no content. |
+| 3 | Offboarding: a consumer's report that a tenant is offboarded, recorded as a new record; a dry-run listing of that tenant's copies and when each ages out. |
+| 4 | Erasure evidence: per tenant or database, the copies that exist or existed, their classes, the longest retention among them and their deletion records; a key deletion is never counted. |
+| 5 | Docs and release-notes entry. |
+
+Sign-off: the retention classes and the recorded-deletion record; how a consumer reports an offboarded
+tenant (*proposed*: a `mimiron` command and a library call run by the consumer's own job); whether
+offboarding only lets copies age out or may trigger an earlier deletion (*proposed*: age out by the
+declared retention unless the consumer declared an offboarding rule); who may run a deletion and with
+which credential; the layout of the erasure evidence. No retention number and no certificate text is
+written here: both stay with the consumer and its counsel.
+
+### Phase 10 — Operations runs and verdicts
+
+| Commit | Content |
+|---|---|
+| 1 | Operations jobs as runs: Thorim records a job of a realm with the P8 fields only; command output is not stored. |
+| 2 | Reported restore verification: the outcome of a drill run inside the realm, and whether the application's post-restore step was reported complete. |
+| 3 | Expectations per realm: backup age, a missed schedule, an overdue restore drill, a copy still present past its retention. |
+| 4 | Verdicts for a consumer's console: a machine-readable form of the `mimiron observe` verdict. |
+| 5 | Docs and release-notes entry. |
+
+Sign-off: the fields of an operations run; the contract by which a realm reports a restore
+verification; the new expectations and their names (thresholds stay declared by the consumer, as in
+v0.1); how Molten Core's console reads verdicts (*proposed*: the library or the machine-readable CLI
+output — the web view and HTTP API stay under Later); the notifier for a realm's failing expectation.
+
+### Phase 11 — Molten Core adoption and release
+
+| Commit | Content |
+|---|---|
+| 1 | Adoption guide for a personal-data consumer: scopes, per-realm storage, declared retention, what the consumer encrypts and reports. |
+| 2 | End-to-end test: a sample consumer with two realms and two tenants, synthetic ciphertext, archived, aged out, offboarded and observed through its configuration alone; one realm's credential cannot reach the other's bucket. |
+| 3 | v0.2.0 release: version, release notes, this section removed. |
+
+The Molten Core side is a separate pull request in `Deluha/Project_Molten_Core`, under that
+repository's own rules. The hand-over to Ulduar's archive is switched on per realm (D18); until then
+a realm's dumps stay in its own object-locked bucket. Candidates: hand over each realm's encrypted
+dumps and collected logs to Hodir; record its operations jobs with Thorim; report its in-realm restore
+drills; show `mimiron observe` verdicts in its console. Running Ulduar against a realm is the consumer
+owner's own run (D11).
+
+Sign-off: which realm is switched on first (*proposed*: a non-production realm such as
+`developath/uat`); how Molten Core installs the package; the Archivum's host in the management realm;
+each realm's bucket and storage credential; which of the candidates above Molten Core adopts first.
