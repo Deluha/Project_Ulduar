@@ -2,16 +2,37 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
+
+import pytest
+
 from dev_tools import check_conventions as cc
 
 PKG = "ulduar/"
 
 
-def test_c1_consumer_name_in_package_only() -> None:
-    out = cc.check_generic_core([(PKG + "a.py", '"""Doc."""\nX = "Project Blackwing"\n'), ("tests/t.py", "blackwing")])
-    assert out == [f"{PKG}a.py:2: C1 consumer name `blackwing` inside the package (R1)"]
-    out = cc.check_generic_core([(PKG + "b.py", "# DeveloPath\n")])
-    assert out == [f"{PKG}b.py:1: C1 consumer name `developath` inside the package (R1)"]
+def test_c1_forbidden_digest_in_any_text_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    word = "zzforbiddenzz"
+    monkeypatch.setattr(cc, "FORBIDDEN_NAME_DIGESTS", frozenset({hashlib.sha256(word.encode()).hexdigest()}))
+    sources = [
+        (PKG + "a.py", f'"""Doc."""\nX = "Project {word.title()}"\n'),
+        ("tests/test_t.py", f"# {word}\n"),
+        ("docs/notes.md", f"clean\nsee the {word.upper()}-project and {word} again\n"),
+        (PKG + "ok.py", "X = 'zzforbidden zz'\n"),
+        ("README.md", f"{word}s and x{word} are other words\n"),
+    ]
+    out = cc.check_generic_core(sources)
+    assert out == [
+        f"{PKG}a.py:2: C1 name of another project `{word}` (R1)",
+        f"tests/test_t.py:1: C1 name of another project `{word}` (R1)",
+        f"docs/notes.md:2: C1 name of another project `{word}` (R1)",
+    ]
+
+
+def test_c1_real_deny_list_is_six_sha256_digests() -> None:
+    assert len(cc.FORBIDDEN_NAME_DIGESTS) == 6
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in cc.FORBIDDEN_NAME_DIGESTS)
 
 
 def test_c2_print_outside_console_module() -> None:

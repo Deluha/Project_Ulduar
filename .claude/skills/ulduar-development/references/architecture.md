@@ -37,14 +37,14 @@ and no doc describes behaviour that is not built.
   repository, through an adapter or the configuration file. The package never learns them (R1).
 - Ulduar reads a consumer's database, folders and Drive through read-only access and writes only to its
   own two stores (R6). Running Ulduar against live data is the consumer owner's own run.
-- The first consumer is Project Blackwing; its adoption is a pull request in its own repository under
+- The first consumer is a data-pipeline project; its adoption is a pull request in its own repository under
   its own rules.
 
 ## Stores
 
 | Store | Holds | Technology | Contract |
 |---|---|---|---|
-| The Archivum | Catalog, lineage, runs, measurements, verdicts | PostgreSQL 18; its schema installed through the `caverns-of-time` ledger (R7) | Append-only history (R5) |
+| The Archivum | Catalog, lineage, runs, measurements, verdicts | PostgreSQL 18; its schema installed through Ulduar's own versioned-SQL ledger (R7) | Append-only history (R5) |
 | The archive | Raw files, database dumps, reports, models | An S3-compatible bucket or a local directory behind one storage interface | Immutable, content-addressed objects (R5) |
 
 Both are provided by the consumer; no credential to either is stored in the Archivum or the repository (R11).

@@ -6,8 +6,7 @@ What shipped, newest first. What is planned: `ROADMAP.md`.
 
 ### Phase 0 — Development process
 
-No product code. The development process is ported from Project Blackwing, by way of Caverns of Time,
-and adapted to this repository:
+No product code. The development process of this repository:
 
 - `CLAUDE.md`: four operating principles, eleven hard rules, the ask-first list.
 - Agents (`implementer`, `reader`, `reviewer`, `scribe`), the session-start and post-edit hooks,

@@ -20,7 +20,7 @@ def test_no_documented_area_passes() -> None:
 @pytest.mark.parametrize(
     ("code_file", "doc"),
     [
-        ("ulduar/nozdormu.py", "ulduar/README.md"),
+        ("ulduar/sample.py", "ulduar/README.md"),
         ("dev_tools/verify.py", "dev_tools/README.md"),
         ("tests/test_x.py", "tests/README.md"),
         (".github/workflows/ci-tests.yml", SKILL + "references/qa-and-ci.md"),
@@ -36,16 +36,16 @@ def test_area_needs_its_doc(code_file: str, doc: str) -> None:
 
 @pytest.mark.parametrize("doc", ["CLAUDE.md", SKILL + "SKILL.md", SKILL + "references/conventions.md"])
 def test_global_docs_satisfy_any_area(doc: str) -> None:
-    assert _code({"ulduar/nozdormu.py", doc}) == 0
+    assert _code({"ulduar/sample.py", doc}) == 0
 
 
 def test_non_doc_skill_files_do_not_satisfy() -> None:
-    assert _code({"ulduar/nozdormu.py", SKILL + "evals/evals.json"}) == 1
-    assert _code({"ulduar/nozdormu.py", ".claude/skills/verify/SKILL.md"}) == 1
+    assert _code({"ulduar/sample.py", SKILL + "evals/evals.json"}) == 1
+    assert _code({"ulduar/sample.py", ".claude/skills/verify/SKILL.md"}) == 1
 
 
 def test_other_areas_readme_does_not_satisfy() -> None:
-    assert _code({"ulduar/nozdormu.py", "dev_tools/README.md"}) == 1
+    assert _code({"ulduar/sample.py", "dev_tools/README.md"}) == 1
 
 
 def test_non_code_suffix_in_an_area_is_ignored() -> None:
@@ -54,7 +54,7 @@ def test_non_code_suffix_in_an_area_is_ignored() -> None:
 
 
 def test_token_on_its_own_line_skips_and_inline_does_not() -> None:
-    changed = {"ulduar/nozdormu.py"}
+    changed = {"ulduar/sample.py"}
     assert _code(changed, "Fix\n\n[skip-docs]\n") == 0
     assert _code(changed, "Fix\n\n  [docs-ok]  \n") == 0
     assert _code(changed, "Fix, see [skip-docs] in the guide\n") == 1

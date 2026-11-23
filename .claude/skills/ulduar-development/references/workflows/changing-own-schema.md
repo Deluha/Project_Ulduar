@@ -14,8 +14,8 @@ catalog, the lineage, the run ledger or the verdict history. Rules: R5 and R7
 ## Steps
 
 1. Grep every statement that touches the object (`references/recipes.md#grep`).
-2. Express the change as a new step of the Archivum's changeset, applied through the `caverns-of-time`
-   ledger (R7). Never edit a step that has shipped in a release: its checksum is recorded in consumers'
+2. Express the change as a new step of the Archivum's changeset, applied through the schema ledger
+   (R7). Never edit a step that has shipped in a release: its checksum is recorded in consumers'
    ledgers.
 3. Keep the step idempotent and give it a read-only check.
 4. Compose every statement per R3 (`references/conventions.md#r3`).

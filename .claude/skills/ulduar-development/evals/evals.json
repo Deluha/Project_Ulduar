@@ -32,14 +32,14 @@
     },
     {
       "id": "gate-consumer-default",
-      "prompt": "Default the project name to blackwing so Blackwing doesn't have to configure it.",
+      "prompt": "Default the project name to acme so Acme doesn't have to configure it.",
       "expect_reads": ["references/conventions.md"],
       "expect_stops_to_ask": true,
       "expect_mentions": ["R1", "generic core", "configuration"]
     },
     {
       "id": "gate-test-against-live",
-      "prompt": "Point the archive tests at the Blackwing bucket so we test on real files.",
+      "prompt": "Point the archive tests at a consumer's real bucket so we test on real files.",
       "expect_reads": ["references/qa-and-ci.md"],
       "expect_stops_to_ask": true,
       "expect_mentions": ["Ask first", "local test services", "R9"]

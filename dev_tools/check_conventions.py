@@ -10,6 +10,7 @@ references/checkers.md#checker-project-conventions.
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 import sys
 from collections.abc import Iterable, Iterator
@@ -23,8 +24,17 @@ from dev_tools.check_docs_sync import GitError, git  # noqa: E402
 PACKAGE = "ulduar/"
 TESTS = "tests/"
 
-# C1: names of consuming projects; none may appear inside the package.
-CONSUMER_TOKENS = ("blackwing", "developath")
+# C1: SHA-256 hex digests of lower-case words that name another project; no tracked text file may contain one
+# (the words themselves are kept out of the repository). To add one: hashlib.sha256(word.encode()).hexdigest().
+FORBIDDEN_NAME_DIGESTS = frozenset({
+    "07de97ba846bea2c77ab629017947804aa3bd8880dd65eea0cf5357b9cedf6b1",
+    "382c41b564afb6e20445b140900ce246294d9deeaab6fde8eb7e1227e3a4bd01",
+    "025052e1abee33b26fd59c106fe30649dd05066698cdf8a2d4dee089b90940ce",
+    "31bb52dab0e870909011543ca762f0cbe56b182be748f42f905407b079e6d639",
+    "1c1a31afd099e7a8025eb24230c224edcfb86a84f63294ab5febbc5eab8396f4",
+    "f76ea091b81b488eaff139e449ca2b80ebb985cd94d901bc0108349158fd78ed",
+})  # fmt: skip
+WORD_RE = re.compile(r"[A-Za-z]+")
 # C2: the one package module allowed to call print().
 CONSOLE_MODULE = PACKAGE + "console.py"
 # C3: cursor / connection methods whose first argument is a SQL statement.
@@ -68,15 +78,16 @@ def _package_sources(sources: Iterable[Source]) -> Iterator[Source]:
 
 
 def check_generic_core(sources: Iterable[Source]) -> list[str]:
-    """C1 (R1): no consumer name inside the package."""
+    """C1 (R1): no tracked text file names another project; a word is checked by its SHA-256 digest."""
     out = []
     for path, source in sources:
-        if not path.startswith(PACKAGE):
-            continue
+        forbidden: dict[str, bool] = {}  # each distinct word is hashed once per file
         for number, line in enumerate(source.splitlines(), 1):
-            for token in CONSUMER_TOKENS:
-                if token in line.lower():
-                    out.append(f"{path}:{number}: C1 consumer name `{token}` inside the package (R1)")
+            for word in dict.fromkeys(w.lower() for w in WORD_RE.findall(line)):
+                if word not in forbidden:
+                    forbidden[word] = hashlib.sha256(word.encode()).hexdigest() in FORBIDDEN_NAME_DIGESTS
+                if forbidden[word]:
+                    out.append(f"{path}:{number}: C1 name of another project `{word}` (R1)")
     return out
 
 
@@ -265,15 +276,16 @@ def run_all(files: list[str], sources: list[Source]) -> list[str]:
 
 
 def repo_inputs(repo_root: Path = REPO_ROOT) -> tuple[list[str], list[Source]]:
-    """Tracked plus untracked-but-not-ignored files that exist, and the text of every package file and of
-    the test files (C1 reads a package file of any type: a consumer name in a TOML default counts too)."""
+    """Tracked plus untracked-but-not-ignored files that exist, and the text of every one that is UTF-8
+    (C1 reads them all; the other rules pick their files by path)."""
     listed = git("ls-files", "--cached", "--others", "--exclude-standard").splitlines()
     files = sorted({f for f in listed if (repo_root / f).is_file()})
-    sources = [
-        (f, (repo_root / f).read_text(encoding="utf-8", errors="replace"))
-        for f in files
-        if f.startswith(PACKAGE) or (f.startswith(TESTS) and f.endswith((".py", ".sql", ".md")))
-    ]
+    sources = []
+    for f in files:
+        try:
+            sources.append((f, (repo_root / f).read_text(encoding="utf-8")))
+        except UnicodeDecodeError:
+            continue  # a binary file holds no text to scan
     return files, sources
 
 

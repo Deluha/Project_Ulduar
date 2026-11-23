@@ -50,8 +50,7 @@ A Codespace or Dev Container sets all of this up itself (`.devcontainer/devconta
 
 `CLAUDE.md` holds the operating principles, the eleven hard rules and the ask-first list; the development
 skill under `.claude/skills/` routes each task to its one authoritative file. `CONTRIBUTING.md` covers
-setup, the QA gates and the PR flow. The process is ported from Project Blackwing, the first planned
-consumer, by way of Caverns of Time.
+setup, the QA gates and the PR flow.
 
 ## Release & versioning
 

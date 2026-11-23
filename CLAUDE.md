@@ -34,8 +34,9 @@ implement → verify (`references/qa-and-ci.md#verify`) → update the changed a
 
 Binding short form; the full form of rule N is section RN of `references/conventions.md`.
 
-1. **Generic core** — no consumer's name, schema, table or convention inside the package; a consumer integrates
-   through an adapter and a configuration file in its own repository.
+1. **Generic and standalone** — no consumer's name, schema, table or convention inside the package, and no other project
+   named anywhere in the repository or depended on; a consumer integrates through an adapter and a configuration file in
+   its own repository.
 2. **One canonical helper** — shared helpers are defined once and imported, never re-implemented; library code logs
    through `logging`, CLI output goes through the console helpers, never raw `print`.
 3. **Safe SQL** — an identifier is composed with the driver's quoting, a value is bound as a parameter; never
@@ -46,8 +47,8 @@ Binding short form; the full form of rule N is section RN of `references/convent
    by an edit.
 6. **Read-only towards consumers** — never write to a consumer's database or source folder; read through a role
    that can only read; write only to the Archivum and the archive store.
-7. **Own schema through the ledger** — the Archivum's tables are created and changed through the
-   `caverns-of-time` ledger, never by ad-hoc DDL.
+7. **Own schema through the ledger** — the Archivum's tables are created and changed through Ulduar's own versioned-SQL
+   ledger, never by ad-hoc DDL.
 8. **Docs move with the code** — a documented area's change updates its `README.md` in the same PR (`[skip-docs]`:
    escape hatch).
 9. **Real services in tests** — database behaviour on PostgreSQL 18, archive behaviour on an S3-compatible server,

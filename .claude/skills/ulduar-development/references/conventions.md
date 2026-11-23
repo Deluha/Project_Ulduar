@@ -4,15 +4,16 @@ Full forms of the hard rules R1–R11 (short forms: `CLAUDE.md`), the simplicity
 SQL and archive patterns. Each rule names how it is enforced: a checker rule C1–C9
 (`references/checkers.md#checker-project-conventions`), a test, or review.
 
-## R1 generic core
+## R1 generic core, standalone
 
 The package serves any data project. Nothing inside it names a consumer, a consumer's schema, table, folder
 or job, or copies a consumer's convention. A consumer integrates through an adapter and a configuration
 file that live in the consumer's repository; a sample consumer in `tests/` is a test fixture, not an
 exception. Project, dataset, job, schema, table, bucket and path names always arrive as arguments or
-configuration, never as constants.
+configuration, never as constants. Ulduar is also standalone: no other project is named anywhere in the
+repository and none is a dependency.
 
-Enforced: C1 (known consumer names), review for the rest.
+Enforced: C1 (a deny-list of hashed project names, over the whole repository), review for the rest.
 
 ## R2 one canonical helper
 
@@ -69,10 +70,9 @@ Enforced: review; the connectors' phase adds a test that a write through a conne
 
 ## R7 own schema through the ledger
 
-The Archivum's tables, views and functions are created and changed by steps recorded in the
-`caverns-of-time` ledger, the same way a consumer's changes are. No ad-hoc DDL in application code, no
-schema created as a side effect of an unrelated call. If that library's ledger is not merged when
-Phase 1 starts, Phase 1 uses plain versioned SQL and says so at its sign-off (`ROADMAP.md`, D9).
+The Archivum's tables, views and functions are created and changed by steps recorded in Ulduar's own
+versioned-SQL ledger. No ad-hoc DDL in application code, no schema created as a side effect of an
+unrelated call.
 Workflow: `references/workflows/changing-own-schema.md`.
 
 Enforced: review, plus the workflow's test checklist.
