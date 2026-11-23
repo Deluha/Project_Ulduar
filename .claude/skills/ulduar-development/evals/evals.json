@@ -1,6 +1,6 @@
 {
   "skill_name": "ulduar-development",
-  "how_to_run": "By hand before merging a change to CLAUDE.md, the skill or .claude/rules: give each prompt to a fresh session (plan mode, no edits) and compare what it reads and where it stops with the expectations. Not a CI job: slow, paid and non-deterministic.",
+  "how_to_run": "By hand before merging a change to CLAUDE.md, the skill or .claude/rules: give each prompt to a fresh session (plan mode, no edits) and compare what it reads and where it stops with the expectations. Not a CI job: slow, paid and non-deterministic. The session under test must not open this file: tell it so, and do not count a run that read its own expectations.",
   "evals": [
     {
       "id": "gate-archivum-column",
