@@ -133,6 +133,7 @@ the same day in the review of the pull request that added the personal-data rele
   identifiers, states, counts, sizes and checksums only, never names or record contents; legal
   classification and retention numbers stay with the consumer and its counsel. The scope rules P1–P9
   restate them.
+  *Amended 2026-11-23 (D24):* times of Ulduar's own events may be stored as well.
 - **Times are metadata (D24).** What Ulduar stores about a consumer may carry times of its own events:
   when a run started and ended, when a copy was archived, verified or deleted. It never carries a time
   taken from a record's contents.
@@ -177,7 +178,7 @@ is merged. Kick-off prompt: "Implement Phase N of `ROADMAP.md` following its Run
 6. **Stay in scope.** The scope rules bind every phase. A phase that finds an agreed item infeasible, or
    needs something not listed here, stops and asks the owner; it never narrows or widens scope itself.
 
-*Proposed*: Phase 7 starts only when v0.1.0 is tagged. Phases 7–10 change ask-first items of `CLAUDE.md`
+*Proposed*: Phase 7 starts only when v0.1.0 is tagged. Phases 7–11 change ask-first items of `CLAUDE.md`
 (the Archivum schema, the object layout, the CLI and configuration surface, archive deletion and
 retention); a phase's sign-off is where the owner confirms them.
 
@@ -515,8 +516,9 @@ which does not exclude it).
 
 In no planned release; each is an owner decision when its time comes.
 
-- A read-only web view and an HTTP API over the Archivum (D2). Project Molten Core's console is the
-  first consumer that would show Ulduar's verdicts (D16); still later, still an owner decision.
+- A read-only web view and an HTTP API over the Archivum (D2): still later, still an owner decision.
+  Project Molten Core's console is the first consumer that shows Ulduar's verdicts (D16); in v0.2 it
+  reads them without either (Phase 10).
 - Adoption by Blackwing Analytics once its hosting phase exists. DeveloPath's data reaches Ulduar through
   Project Molten Core (D15–D17): the required encryption, per-tenant separation, retention and erasure
   rules its personal data needs are the personal-data release (v0.2 — Personal data), with the retention
