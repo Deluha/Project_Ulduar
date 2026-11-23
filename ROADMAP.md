@@ -8,10 +8,10 @@ Approved by the owner on 2026-11-22: the concept, the form, the process timing a
 below (D1–D14). What is still marked *proposed* inside a phase is that phase's starting position,
 presented as a concrete proposal and confirmed at its sign-off. Nothing is built yet.
 
-Decided by the owner on 2026-11-23, in the planning session for Project Molten Core and DeveloPath:
-decisions D15–D23 and the personal-data release they add, whose section follows v0.1's (*proposed* name:
-v0.2 — Personal data). v0.1 stays as approved. Everything in that section beyond D15–D23 is *proposed*
-until the owner confirms it.
+Decided by the owner on 2026-11-23, in the planning session for Project Molten Core and DeveloPath and in
+the review of the pull request that followed: decisions D15–D23 and the personal-data release they add,
+whose section follows v0.1's (*proposed* name: v0.2 — Personal data). v0.1 stays as approved. Everything
+in that section beyond D15–D23 is *proposed* until the owner confirms it.
 
 ## v0.1 — A vault and observatory for data projects
 
@@ -335,15 +335,19 @@ the same day in the review of the pull request that added this section. Sources:
   operations modules (Terraform, VPN, alert routing). Blackwing Analytics is not decided here.
 - **Scope rules outlive v0.1 (D22).** When v0.1 is tagged, the scope rules D1–D14 with their dated notes
   move to a permanent section of this file instead of leaving with the v0.1 section. Phase 6's release
-  row is amended accordingly; nothing else of v0.1's approved text changes.
+  row is amended accordingly; this decision changes nothing else of v0.1's approved text.
 - **The consumers' constraints are decided (D23).** What the two plans require of this release is
-  decided, not proposed (Project Molten Core's owner decisions O1–O9, DeveloPath's O37–O48): ciphertext
-  only for dumps, with the private keys on the realm's database host and in an offline escrow; the
-  consumer's post-restore step after every path that brings back older data; retention from the
-  consumer's manifest on every archived copy; an offboarded tenant's copies age out; deleting a key is
-  never reported as erasure; what Ulduar stores about a consumer carries identifiers, states, counts,
-  sizes and checksums only; legal classification and retention numbers stay with the consumer and its
-  counsel. The scope rules below restate them.
+  decided, not proposed (Project Molten Core's owner decisions O1–O9, DeveloPath's O37–O48): dumps reach
+  Ulduar as ciphertext only, with the private keys on the realm's database host and in an offline escrow,
+  never in the management realm and never available to Ulduar; the consumer's post-restore step runs
+  after every path that brings back older data, an archive restore verification included, before the data
+  is used for anything, and Ulduar never applies erasure or needs plaintext to honour it; retention comes
+  from the consumer's manifest and applies to every archived copy; an offboarded tenant's copies age out;
+  deleting a key is never reported as erasure, and an erasure or offboarding certificate uses the longest
+  retention among backup lock, dumps and archived copies; what Ulduar stores about a consumer carries
+  identifiers, states, counts, sizes and checksums only, never names or record contents; legal
+  classification and retention numbers stay with the consumer and its counsel. The scope rules below
+  restate them.
 
 ### Scope rules
 
@@ -352,14 +356,14 @@ They restate the consumers' constraints, which are decided (D23). What a rule ad
 D13 with its note of 2026-11-23 (D20); where the reading of another rule is open (D6 in Phase 7, D2 in
 Phase 11), that phase's sign-off says so.
 
-- **Ciphertext only (P1).** A dump is encrypted on the database host before it leaves, one recipient key
-  per database. Ulduar handles ciphertext only for dumps: it receives, stores, checksums and verifies it,
-  and never holds, reads or is configured with a private key. The private keys stay on the realm's
-  database host and in an offline escrow; they are never in the management realm and never available to
-  Ulduar. *Proposed*: Hodir refuses an object of a personal-data class that is not declared encrypted;
-  the `pg_dump` connector of v0.1 is not used on a database that holds personal data, because Ulduar is
-  handed the dump's ciphertext; how collected logs are encrypted — where, and with which key — is the
-  consumer's to declare (Phase 8 sign-off).
+- **Ciphertext only (P1).** A dump is encrypted on the database host before it leaves (in the consumers'
+  plans, with one recipient key per database). Ulduar handles ciphertext only for dumps: it receives,
+  stores, checksums and verifies it, and never holds, reads or is configured with a private key. The
+  private keys stay on the realm's database host and in an offline escrow; they are never in the
+  management realm and never available to Ulduar. *Proposed*: Hodir refuses an object of a personal-data
+  class that is not declared encrypted; the `pg_dump` connector of v0.1 is not used on a database that
+  holds personal data, because Ulduar is handed the dump's ciphertext; how collected logs are encrypted —
+  where, and with which key — is the consumer's to declare (Phase 8 sign-off).
 - **Integrity on ciphertext, plaintext in the realm (P2).** Hodir's checksum and verification work on
   ciphertext. A restore check that needs plaintext runs inside the consumer's realm, never in Ulduar
   (D20). Molten Core calls the consumer's post-restore step (for DeveloPath: applying its erasure ledger)
@@ -373,31 +377,31 @@ Phase 11), that phase's sign-off says so.
   and holds metadata only (D19). Credentials arrive from the environment at run time (D12). *Proposed*:
   the storage configuration names one bucket and one credential per realm, and no configuration gives
   one credential reach into two realms.
-- **Per-tenant separation (P4).** One tenant's archived copies can be listed, aged out and deleted
-  without touching another's (D17). *Proposed*: the object key layout and the catalog carry the scopes
-  the consumer declares (for Molten Core: realm, database and, where there is one, tenant), and the
-  content address is scoped inside that prefix, so an identical object is never deduplicated across
-  tenants or realms.
+- **Per-tenant separation (P4).** One tenant's archived copies are kept separable from another's (D17).
+  *Proposed*: the object key layout and the catalog carry the scopes the consumer declares (for Molten
+  Core: realm, database and, where there is one, tenant), so that a declared tenant's copies can be
+  listed, aged out and deleted without touching another's; the content address is scoped inside that
+  prefix, so an identical object is never deduplicated across tenants or realms.
 - **Declared retention on every copy (P5).** Retention numbers come from the consumer's manifest and
   apply to every archived copy (DeveloPath's: per-database dumps 14 days, logs 30 days). Deletion happens
   only by the declared rule and is itself recorded (D7). The numbers are the consumer's and its
   counsel's; Ulduar invents none. *Proposed*: no default — a personal-data class without a declared
   retention is refused.
-- **Deleting a key is never erasure (P6).** Erasure means the copies aged out by retention or were
-  deleted by a declared rule, itself recorded; the deletion of an encryption key is never reported as
-  erasure. An erasure or offboarding certificate is issued by the consumer and uses the longest retention
-  among backup lock, dumps and archived copies. How the legal documents classify these tools is with the
-  consumer's counsel; nothing here classifies them, and Ulduar writes no certificate and no legal text.
-  *Proposed*: Ulduar supplies recorded evidence for the archived copies it holds, those that hold several
-  tenants' data included; the backup lock and copies held elsewhere are the consumer's to count.
+- **Deleting a key is never erasure (P6).** The deletion of an encryption key is never reported as
+  erasure: Ulduar reports a copy as gone only when it aged out by retention or was deleted by a declared
+  rule, itself recorded. An erasure or offboarding certificate is issued by the consumer and uses the
+  longest retention among backup lock, dumps and archived copies. How the legal documents classify these
+  tools is with the consumer's counsel; nothing here classifies them, and Ulduar writes no certificate
+  and no legal text. *Proposed*: Ulduar supplies recorded evidence for the archived copies it holds,
+  those that hold several tenants' data included; the backup lock and copies held elsewhere are the
+  consumer's to count.
 - **Offboarding (P7).** When a consumer reports a tenant as offboarded, that tenant's archived copies age
   out by their declared retention, without touching other tenants (P4).
 - **No personal data in the catalog or the run ledger (P8).** Catalog entries, run records and anything
   else Ulduar stores about a consumer carry identifiers, states, counts, sizes and checksums only — never
-  a person's name or record contents. Molten Core applies the same rule to hook output and metric labels.
-  *Proposed*: times are stored as well (when a run started and ended, when a copy was archived or
-  deleted), since a run ledger and a judgment of age need them; a tenant is an opaque identifier issued
-  by the consumer.
+  names or record contents. *Proposed*: times are stored as well (when a run started and ended, when a
+  copy was archived or deleted), since a run ledger and a judgment of age need them; a tenant is an
+  opaque identifier issued by the consumer.
 - **Boundaries unchanged (P9).** The boundaries of D6, D11 and D13 hold, D13 as amended by its note
   (D20). No test, workflow or development session of this repository touches a realm; tests use synthetic
   ciphertext on the local test services (D10). *Proposed*: the package fixes two roles only — the storage
@@ -420,9 +424,10 @@ Phase 11), that phase's sign-off says so.
 As v0.1's Running a phase section, with "v0.2.0 — in development" as the release-notes section; Phase 11
 turns it into the release entry and removes this section. *Proposed*: Phase 7 starts only when v0.1.0 is
 tagged. The scope rules D1–D14 move to a permanent section then (D22); *proposed*: the Running a phase
-steps and the Later list move here at the same time. Phases 7–10 change ask-first items of `CLAUDE.md`
-(the Archivum schema, the object layout, the CLI and configuration surface, archive deletion and
-retention); a phase's sign-off is where the owner confirms them.
+steps and the Later list move here at the same time. *Proposed*: when v0.2 is tagged, D15–D23 join D1–D14
+in that permanent section, since the notes on D13 and D14 cite them. Phases 7–10 change ask-first items
+of `CLAUDE.md` (the Archivum schema, the object layout, the CLI and configuration surface, archive
+deletion and retention); a phase's sign-off is where the owner confirms them.
 
 ### Phase 7 — Scopes and the catalog
 
@@ -441,10 +446,10 @@ level) and what the package calls them; how a realm maps to a catalog project; h
 to v0.1's artifact kinds and retention classes; the per-realm storage configuration and how a credential
 is named per realm; whether a realm's archive bucket is the bucket the consumer writes first or a second
 one, and how D6 reads in either case; where the Archivum runs in the management realm and which roles
-reach it; whether an opaque tenant identifier is itself treated as personal data; whether Ulduar catalogs
-or ignores the small integrity records an application writes to the export location a realm offers in its
-backup project, for example an audit chain head (*proposed*: catalogs them by identifier, checksum and
-size, never reading them).
+reach it; how an opaque tenant identifier is handled if the consumer's counsel treats it as personal
+data; whether Ulduar catalogs or ignores the small integrity records an application writes to the export
+location a realm offers in its backup project, for example an audit chain head (*proposed*: catalogs them
+by identifier, size and the checksum the application supplies, never reading them).
 
 ### Phase 8 — Ciphertext and separation
 
@@ -455,16 +460,17 @@ size, never reading them).
 | 3 | Get and verify on ciphertext: the checksum is of the stored bytes; get returns ciphertext only. |
 | 4 | Docs and release-notes entry. |
 
-Sign-off: the encryption scheme the consumer uses and whether Ulduar ever handles keys (*proposed*: never
-— neither private nor public; it records only the format and the recipient-key identifier the consumer
-declares; for personal data the consumer encrypts, not Hodir, unlike the optional encryption v0.1's Phase
-2 proposes); how Hodir recognises ciphertext (*proposed*: the declared format plus a check of the
-format's header, no decryption); the per-tenant object key layout; how a copy that holds several tenants'
-data is recorded (*proposed*: as shared — it cannot be separated and ages out by its class); whether
-collected logs are a personal-data class (*proposed*: yes, unless the consumer declares otherwise) and,
-if so, who encrypts them, where and with which recipient key — P1's key per database does not apply to
-them; what is required of a realm's bucket (versioning, object lock) and how a lock period or a kept
-version relates to the declared retention and to a recorded deletion.
+Sign-off: the encryption scheme the consumer uses and whether Ulduar handles public keys — private keys
+never, as P1 decides (*proposed*: no public keys either; it records only the format and the recipient-key
+identifier the consumer declares; for personal data the consumer encrypts, not Hodir, unlike the optional
+encryption v0.1's Phase 2 proposes); how Hodir recognises ciphertext (*proposed*: the declared format
+plus a check of the format's header, no decryption); the per-tenant object key layout; how a copy that
+holds several tenants' data is recorded (*proposed*: as shared — it cannot be separated and ages out by
+its class); whether collected logs are a personal-data class (*proposed*: yes, unless the consumer
+declares otherwise) and, if so, who encrypts them, where and with which recipient key — P1's key per
+database does not apply to them; what is required of a realm's bucket (versioning, object lock) and how a
+lock period or a kept version relates to the declared retention and to a recorded deletion; whether the
+`pg_dump` connector is barred from a database that holds personal data (P1).
 
 ### Phase 9 — Retention, deletion and erasure
 
@@ -494,7 +500,8 @@ certificate text is written here: both stay with the consumer and its counsel.
 Sign-off: the fields of an operations run; the contract by which a realm reports a restore verification;
 the new expectations and their names (*proposed*, as in v0.1's Phase 5: every threshold is declared by
 the consumer); how Molten Core's console reads verdicts (*proposed*: the library or the machine-readable
-CLI output — the web view and HTTP API stay under Later); the notifier for a realm's failing expectation.
+CLI output — the web view and HTTP API stay under Later); the notifier for a realm's failing expectation;
+whether the restore drill of v0.1's Phase 5 is switched off for a personal-data class (P2).
 
 ### Phase 11 — Molten Core adoption and release
 
