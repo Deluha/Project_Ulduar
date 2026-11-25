@@ -18,7 +18,8 @@ catalog, the lineage, the run ledger or the verdict history. Rules: R5 and R7
    table (R7). Never edit a step that has shipped in a release.
 3. The step format and what the ledger records per step are fixed at the Phase 1 sign-off (`ROADMAP.md`).
 4. Compose every statement per R3 (`references/conventions.md#r3`).
-5. No step updates, deletes or truncates recorded history (R5).
+5. No step updates, deletes or truncates recorded history (R5); the declared retention and the redaction of
+   history are run by the ledger role, never by a step.
 
 ## Verification
 

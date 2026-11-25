@@ -15,7 +15,7 @@ whose section follows v0.1's (v0.2 — Personal data). v0.1 stays as approved. E
 is *proposed* until the owner confirms it, unless it restates one of those decisions.
 
 Decided by the owner on 2026-11-25, in the roadmap review held before Phase 1 and in two independent
-reviews that followed it: decisions D27–D41 and the phase amendments that follow from them. An amendment
+reviews that followed it: decisions D27–D42 and the phase amendments that follow from them. An amendment
 that is not one of those decisions is *proposed* and is confirmed at its phase's sign-off.
 
 ## Why
@@ -79,6 +79,8 @@ rewording.
 - **Real services in tests (D10).** Database behaviour is tested on a real PostgreSQL 18 and archive
   behaviour on a real S3-compatible server, both throwaway containers. No mocks; a skipped service
   test fails the done gate.
+  *Amended 2026-11-25 (D42):* a third-party service with no local real server is tested against a local
+  simulated server built from recorded responses.
 - **Never a live system (D11).** No test, workflow or development session of this repository connects to a
   consumer's database, Drive folder or bucket. Running Ulduar against live data is the consumer
   owner's own run.
@@ -159,7 +161,8 @@ confirmed the same day in the review of the pull request that added the personal
 ### Owner decisions (2026-11-25)
 
 Taken in the roadmap review held before Phase 1 (D27–D34) and in two independent reviews of the amended
-roadmap (D35–D41). D27–D32 and D35–D40 shape the Archivum schema and the object layout from the first
+roadmap (D35–D41), and D42, taken the same day on the question Phase 3's sign-off had left open.
+D27–D32 and D35–D40 shape the Archivum schema and the object layout from the first
 phase on.
 
 - **A scope slot from the start (D27).** The Archivum schema (Phase 1) and the object key
@@ -224,6 +227,11 @@ phase on.
   changed for a declared number of runs. D24 stands for a personal-data class unless Phase 10's
   sign-off decides otherwise; a project without personal data may store the reported mark. Recorded as
   a dated note on D24.
+- **A third-party service is tested against a local simulated server (D42).** A service outside Ulduar's
+  two stores that has no local real server — Google Drive, the GitHub interface — is tested against a
+  simulated server on the local machine, built from recorded real responses. This is the one exception to
+  D10; it never covers PostgreSQL or the archive store, and no test connects to the real service (D11).
+  Recorded as a dated note on D10.
 
 ## Status
 
@@ -344,15 +352,14 @@ consumer's jobs, TLS, connection limits (D28); how one project's credential is k
 project's records (D29; *proposed*: one role per project and row-level security); how append-only is
 enforced (D30; *proposed*: the recording roles hold insert and select privileges only, and triggers
 refuse their updates and deletes; the ledger role alone passes them, for the retention and redaction of
-D40); which role applies
-the ledger and how it is kept apart from the recording roles (D30); the runtime dependencies this phase
-adds; the Python versions CI tests (*proposed*: every supported release from 3.11 to the newest); the
-configuration file format, moved here from Phase 3 (*proposed*: one TOML file in the consumer's
-repository, read with the standard library, with a version key, unknown keys refused and credentials
-given only as names of environment variables); how a shared Archivum is upgraded without locking out
-older clients (D29; *proposed*: each ledger step is declared additive or breaking, the schema records
-the lowest library version it still supports, the library refuses only below it, a breaking step needs
-an explicit flag, the ledger stores a checksum per applied step, and it is applied under a
+D40); which role applies the ledger and how it is kept apart from the recording roles (D30); the runtime
+dependencies this phase adds; the Python versions CI tests (*proposed*: every supported release from 3.11
+to the newest); the configuration file format, moved here from Phase 3 (*proposed*: one TOML file in the
+consumer's repository, read with the standard library, with a version key, unknown keys refused and
+credentials given only as names of environment variables); how a shared Archivum is upgraded without
+locking out older clients (D29; *proposed*: each ledger step is declared additive or breaking, the schema
+records the lowest library version it still supports, the library refuses only below it, a breaking step
+needs an explicit flag, the ledger stores a checksum per applied step, and it is applied under a
 transaction-scoped advisory lock with a lock timeout, safe behind a connection pooler); the connection
 contract's time limits (*proposed*: a connect timeout, a statement timeout and one total budget per
 recording call, D33); read isolation between projects as well as write isolation (*proposed*: select
@@ -367,13 +374,13 @@ history retention and redaction records (D40), which history may age out or be r
 deletion, purge and redaction records never do), how history is partitioned in a shared Archivum
 (*proposed*: by project and time), and how a retention or a redaction reaches the object manifests and
 the archived dumps of the Archivum, which would otherwise bring a removed value back (D32); the server
-versions accepted (*proposed*: the server version is checked at connect and anything but PostgreSQL 18 is
-refused with a clear message); the library's logging contract (*proposed*: loggers under the package's
-name, no handler of its own, the root logger never touched); the public exceptions; the versioning and
-deprecation policy, stated in `README.md`; the development toolchain (*proposed*: a locked set of
-development tools, container images pinned by digest, a branch-coverage floor in CI, a scheduled
-dependency and static-analysis scan, a private channel for vulnerability reports named in `SECURITY.md`,
-and a threat-model section there).
+versions accepted (*proposed*: the server version is checked at connect and an unsupported one is refused
+with a clear message; PostgreSQL 19 is now released, and whether it joins 18 is the owner's call under
+D8); the library's logging contract (*proposed*: loggers under the package's name, no handler of its own,
+the root logger never touched); the public exceptions; the versioning and deprecation policy, stated in
+`README.md`; the development toolchain (*proposed*: a locked set of development tools, container images
+pinned by digest, a branch-coverage floor in CI, a scheduled dependency and static-analysis scan, a
+private channel for vulnerability reports named in `SECURITY.md`, and a threat-model section there).
 
 ### Phase 2 — Hodir
 
@@ -391,39 +398,41 @@ and a threat-model section there).
 Sign-off: the object key layout with its scope slot (D27); the checksum (*proposed*: SHA-256); the object
 manifest's fields and format (D32) and how it meets deduplication (*proposed*: one manifest per
 registration); the tables that record a verification, a reconciliation and a deletion — Thorim's runs
-arrive only in Phase 4; retention classes and their defaults (*proposed*: no retention rule exists
-unless a consumer declares one; D38 and D39 are the only other deletions) and how they meet
-deduplication (*proposed*: the longest retention among an object's references wins); the runtime
-dependencies this phase adds (*proposed*: the S3 client as an optional extra); what a bucket and its
-credentials must offer so that the store itself refuses an overwrite or a deletion by the writing
-credential (D35; *proposed*: a writing credential without delete rights, a bucket policy that admits
-only conditional writes or else versioning, a separate retention credential, object lock recommended and
-not required), how that reads for a local directory (*proposed*: file permissions, documented as the
-weaker guarantee), and the written list of capabilities an S3-compatible store must have; how a put from
-a stream is committed or abandoned (D36); how a put and a deletion are kept apart (D37; *proposed*: both
-take the same lock on scope and content address in the Archivum, and the deletion re-checks the object's
-references under it); the grace period and the record of the incomplete-put rule, and that reconcile
-ignores an object younger than it (D38); the purge command, its record and the list of reasons a purge
-may declare (D39); how a file whose size is known is stored (*proposed*: hashed first, then written
-straight to its final key with a conditional write — no temporary object) against a true stream, whose
-address is known only when it ends (*proposed*: a temporary key and a copy, or a local spool with a
-declared ceiling; the temporary object leaves by the rule of D38), with the largest supported object, the
-part size, the behaviour above the size one copy request may carry and the clean-up of unfinished
-multipart uploads; how a deletion is recorded on a versioned or locked bucket (*proposed*: two appended
-records — the intent, then the confirmation once the store shows no version of the key — and only the
-confirmation counts as gone); the retention safeguards (*proposed*: the newest copies of a dataset are
-never deleted by age alone, a run deletes no more than a declared number of objects without an explicit
-flag, a shortened rule applies only after a recorded confirmation, and a scheduled run lists by default);
-whether a retention is fixed when an object is archived or read from the configuration of the day; the
-format's own version (*proposed*: the checksum's algorithm in the key, a format version in the object
-manifest, a write-once marker at the store's root that the library checks, and a plain-text description
-of the layout beside it); where object manifests live so that a rebuild need not list every object
-(*proposed*: under their own time-ordered prefix) and which records beyond catalog entries are also
-written to the store (*proposed*: deletion and purge records); the storage classes accepted (*proposed*:
-immediate retrieval only; no bucket rule may expire or move an archived object); the tests of an
-interrupted and of a concurrent put (*proposed*: one injected failure per step of a put, and two
-connections for put against put and put against deletion — whether a failing wrapper over a real backend
-is allowed under hard rule 9 is the owner's call). Hodir has no client-side encryption (D34).
+arrive only in Phase 4; retention classes and their defaults (*proposed*: no retention rule exists unless
+a consumer declares one; D38 and D39 are the only other deletions) and how they meet deduplication
+(*proposed*: the longest retention among an object's references wins); the runtime dependencies this
+phase adds (*proposed*: the S3 client as an optional extra); what a bucket and its credentials must offer
+so that the store itself refuses an overwrite or a deletion by the writing credential (D35; *proposed*: a
+writing credential without delete rights, a bucket policy that admits only conditional writes or else
+versioning, a separate retention credential, object lock recommended and not required), how that reads
+for a local directory (*proposed*: file permissions, documented as the weaker guarantee), and the written
+list of capabilities an S3-compatible store must have; how a put from a stream is committed or abandoned
+(D36); how a put and a deletion are kept apart (D37; *proposed*: both take the same lock on scope and
+content address in the Archivum, and the deletion re-checks the object's references under it); the grace
+period and the record of the incomplete-put rule, and that reconcile ignores an object younger than it
+(D38); the purge command, its record and the list of reasons a purge may declare (D39); how a file whose
+size is known is stored (*proposed*: hashed first, then written straight to its final key with a
+conditional write — no temporary object) against a true stream, whose address is known only when it ends
+(*proposed*: a temporary key and a copy, or a local spool with a declared ceiling; the temporary object
+leaves by the rule of D38), with the largest supported object, the part size, the behaviour above the
+size one copy request may carry and the clean-up of unfinished multipart uploads; how a deletion is
+recorded on a versioned or locked bucket (*proposed*: two appended records — the intent, then the
+confirmation once the store shows no version of the key — and only the confirmation counts as gone); the
+retention safeguards (*proposed*: the newest copies of a dataset are never deleted by age alone, a run
+deletes no more than a declared number of objects without an explicit flag, a shortened rule applies only
+after a recorded confirmation, and a scheduled run lists by default); whether a retention is fixed when
+an object is archived or read from the configuration of the day; the format's own version (*proposed*:
+the checksum's algorithm in the key, a format version in the object manifest, a write-once marker at the
+store's root that the library checks, and a plain-text description of the layout beside it); where object
+manifests live so that a rebuild need not list every object (*proposed*: under their own time-ordered
+prefix) and which records beyond catalog entries are also written to the store (*proposed*: deletion and
+purge records); the storage classes accepted (*proposed*: immediate retrieval only; no bucket rule may
+expire or move an archived object); whether a copy still passes where a bucket policy enforces
+conditional writes, tested before the stream path is fixed; the object store the tests run on, whose
+upstream project is reported archived (S5); the tests of an interrupted and of a concurrent put
+(*proposed*: one injected failure per step of a put, and two connections for put against put and put
+against deletion — whether a failing wrapper over a real backend is allowed under hard rule 9 is the
+owner's call). Hodir has no client-side encryption (D34).
 
 ### Phase 3 — Mimiron
 
@@ -441,28 +450,26 @@ is allowed under hard rule 9 is the owner's call). Hodir has no client-side encr
 Sign-off: command names, flags and output layout; how the Drive connector authenticates (*proposed*: the
 consumer's own service account, read-only scope); where the GitHub Action lives; how `mimiron doctor`
 decides that a role can write; the runtime dependencies this phase adds (*proposed*: the Drive client as
-an optional extra); how a connector to a third-party service is tested — hard rule 9 allows neither a
-mock nor a service beyond the local test services, and Google Drive has no local real server, so the
-owner chooses one of: a test folder owned by this project (an exception to hard rule 9 and to the
-ask-first list), a declared exception to hard rule 9 that allows a recorded or simulated interface for
-third-party services, or the Drive connector moves to Later; whether a connector for a consumer's
-workflow logs joins v0.1 (*proposed*: Later — it meets the same test question); the exit-code contract
-(*proposed*: a code of its own for "could not judge", distinct from a failing verdict and from a usage
-error) and machine-readable output from the first commit (*proposed*: a versioned JSON form of every
-listing, show, verdict and check); how `pg_dump` is run (*proposed*: custom format only, restored with
-`pg_restore` and never fed to a client as a script, the password never on a command line, a minimum
-client version and how a matching client reaches the runner, reference counts recorded at dump time for
+an optional extra); how the simulated Drive server is built and kept true to the real service (D42;
+*proposed*: responses recorded once from the real interface by the owner, stored without credentials or
+real file contents, and recorded again when the interface's version changes); whether a connector for a
+consumer's workflow logs joins v0.1 (*proposed*: Later); the exit-code contract (*proposed*: a code of
+its own for "could not judge", distinct from a failing verdict and from a usage error) and
+machine-readable output from the first commit (*proposed*: a versioned JSON form of every listing, show,
+verdict and check); how `pg_dump` is run (*proposed*: custom format only, restored with `pg_restore` and
+never fed to a client as a script, the password never on a command line, a client at least as new as the
+server it dumps and how a matching client reaches the runner, reference counts recorded at dump time for
 the restore drill); how a consumer installs the package, moved here from Phase 6 because the GitHub
-Action installs it (*proposed*: the Action installs the code at its own ref into an
-environment of its own; the package index is Phase 6's); how credentials reach a connector (*proposed*:
-through the client's standard chain, short-lived identity preferred over a stored key); which role dumps
-a shared Archivum and into which store (D32); whether the storage, connector and notifier interfaces are
-public and under the versioning policy — the adapter D5 names is designed here (*proposed*: small typed
-protocols, chosen by argument; the library is synchronous); the directory connector's handling of links
-and special files (*proposed*: as the local backend, Phase 2); the Drive connector's change rule
-(*proposed*: the file's identifier with its checksum or version; a declared export format for a document
-that has no bytes of its own, or a listing as not archived, never silence; a source deletion recorded; a
-download checked against the source's checksum before it is committed); the operating systems supported.
+Action installs it (*proposed*: the Action installs the code at its own ref into an environment of its
+own; the package index is Phase 6's); how credentials reach a connector (*proposed*: through the client's
+standard chain, short-lived identity preferred over a stored key); which role dumps a shared Archivum and
+into which store (D32); whether the storage, connector and notifier interfaces are public and under the
+versioning policy — the adapter D5 names is designed here (*proposed*: small typed protocols, chosen by
+argument; the library is synchronous); the directory connector's handling of links and special files
+(*proposed*: as the local backend, Phase 2); the Drive connector's change rule (*proposed*: the file's
+identifier with its checksum or version; a declared export format for a document that has no bytes of its
+own, or a listing as not archived, never silence; a source deletion recorded; a download checked against
+the source's checksum before it is committed); the operating systems supported.
 
 ### Phase 4 — Thorim
 
@@ -506,9 +513,9 @@ Sign-off: the expectation vocabulary and its configuration layout; default thres
 none — every threshold is declared by the consumer); the verdict levels and their names; where the
 restore drill may run (*proposed*: only a throwaway local instance, never a consumer's server); the
 issue format and labels; the heartbeat's form (*proposed*: a request to a URL the consumer declares, sent
-whatever the verdict); how the GitHub-issue notifier is tested — the question of Phase 3's sign-off
-applies to it; a verdict level for an expectation that could not be evaluated (*proposed*: its own
-non-passing level and exit code, never shown as passing); the baseline of a tolerance (*proposed*: the
+whatever the verdict); the simulated server the GitHub-issue notifier is tested against (D42); a
+verdict level for an expectation that could not be evaluated (*proposed*: its own non-passing level and
+exit code, never shown as passing); the baseline of a tolerance (*proposed*: the
 last declared number of passing runs, a declared minimum, median-based); a grace period per schedule;
 when an issue is reopened and how a consumer silences an expectation (*proposed*: a recorded, dated
 silence, like Phase 9's hold); further vault-health expectations (*proposed*: a deletion intent without
@@ -550,7 +557,7 @@ copies separable where the consumer declares a tenant, every copy under a declar
 deletion recorded. An operations platform is the first such consumer, not the design target. v0.1 stays
 as approved, with no personal data (D14).
 
-Everything in this section that does not restate an owner decision (D15–D41) is *proposed*: the starting
+Everything in this section that does not restate an owner decision (D15–D42) is *proposed*: the starting
 position, to be confirmed by the owner in the review of the pull request that added this section or at a
 phase's sign-off. A confirmed item loses its *proposed* mark and is recorded, dated; a confirmed scope
 rule takes a D number and moves to the permanent section. A merge alone confirms none of them. No product
@@ -561,7 +568,7 @@ code is built yet.
 They restate the consumers' constraints, which are decided (D23). What a rule adds beyond them is marked
 *proposed* and is confirmed by the owner at the phase sign-off that names it. D1–D13 bind this release,
 D13 with its note of 2026-11-23 (D20); where the reading of another rule is open (D6 in Phase 7, D2 in
-Phase 11), that phase's sign-off says so. D27–D41 bind it too: the incomplete-put rule (D38) and a
+Phase 11), that phase's sign-off says so. D27–D42 bind it too: the incomplete-put rule (D38) and a
 purge (D39) are recorded deletions beside the declared retention of P5 and P6.
 
 - **Ciphertext only (P1).** A dump is encrypted on the database host before it leaves (in the consumers'

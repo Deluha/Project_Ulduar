@@ -42,9 +42,9 @@ Binding short form; the full form of rule N is section RN of `references/convent
 3. **Safe SQL** — an identifier is composed with the driver's quoting, a value is bound as a parameter; never
    string formatting.
 4. **No files the user didn't ask for** — `tests/` is the only test location, no markdown beyond the permanent docs.
-5. **The vault is immutable** — an archived object is never overwritten; deletion happens only by a declared
-   retention rule and is itself recorded; catalog entries, runs and verdicts are corrected by a new record, never
-   by an edit.
+5. **The vault is immutable** — an archived object is never overwritten; every deletion is explicit and recorded:
+   a declared retention rule, the built-in incomplete-put rule or a purge; recorded history is corrected by a
+   new record, never by an edit, and leaves only by declared retention or a recorded redaction.
 6. **Read-only towards consumers** — never write to a consumer's database or source folder; read through a role
    that can only read; write only to the Archivum and the archive store.
 7. **Own schema through the ledger** — the Archivum's tables are created and changed through Ulduar's own
@@ -52,8 +52,9 @@ Binding short form; the full form of rule N is section RN of `references/convent
 8. **Docs move with the code** — a documented area's change updates its `README.md` in the same PR (`[skip-docs]`:
    escape hatch).
 9. **Real services in tests** — database behaviour on PostgreSQL 18, archive behaviour on an S3-compatible server,
-   both local throwaway instances; never a mock; a skipped service test fails the done gate; tests never connect
-   to a consumer's database, Drive folder or bucket.
+   both local throwaway instances; never a mock — only a third-party API with no local real server is tested
+   against a local simulated server built from recorded responses; a skipped service test fails the done gate;
+   tests never connect to a consumer's database, Drive folder or bucket.
 10. **One module per component, flow-only entry** — each component sits behind its own public facade; the
     `mimiron` entry holds only command flow.
 11. **No secrets stored or logged** — credentials arrive from the environment at run time; none is stored in the
