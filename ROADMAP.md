@@ -70,8 +70,7 @@ rewording.
   declared retention rule and is itself recorded. Recorded history (catalog entries, runs, verdicts)
   is corrected by a new record, never by an edit.
   *Amended 2026-11-25 (D38–D40):* the clean-up of an incomplete put, a purge and the retention or
-  redaction of recorded history are declared rules in this sense: each is explicit and is itself
-  recorded.
+  redaction of recorded history are deletions in this sense: each is explicit and is itself recorded.
 - **Stores (D8).** PostgreSQL 18 for the Archivum; an S3-compatible bucket or a local directory for the
   archive, behind one storage interface.
 - **Own schema through its own ledger (D9).** The Archivum's tables are created and changed through
@@ -146,6 +145,9 @@ confirmed the same day in the review of the pull request that added the personal
 - **Times are metadata (D24).** What Ulduar stores about a consumer may carry times of its own events:
   when a run started and ended, when a copy was archived, verified or deleted. It never carries a time
   taken from a record's contents.
+  *Amended 2026-11-25 (D41):* in a project that holds no personal data, a high-water mark the consumer
+  reports may be stored; for a personal-data class the rule stands unless Phase 10's sign-off decides
+  otherwise.
 - **The personal-data release is v0.2 (D25).** Its name is "v0.2 — Personal data" and its phases are
   7–11, so other plans can cite them. What the release contains beyond the owner decisions stays
   *proposed* until its phases' sign-offs.
@@ -207,10 +209,11 @@ phase on.
   a rule built into Ulduar, and the removal is recorded like any deletion. Recorded as a dated note on
   D7.
 - **No free text in a run, and a mistaken write can be purged (D39).** In every release a run records its
-  job's name, the type of a failure and the exit status — never a command line, an environment or a
-  message text. An object archived by mistake can be removed by a purge: an explicit command under the
-  retention credential, which leaves a record of what was removed, when and why — identifier, checksum
-  and size, no content — and is never an edit. Recorded as a dated note on D7.
+  job's name, the type of a failure and the exit status — never a command line, environment variables or
+  a message text. An object archived by mistake can be removed by a purge: an explicit command under the
+  retention credential, which leaves a record of what was removed, when and for which declared reason —
+  identifier, checksum and size, no content and no free text — and is never an edit. Recorded as a dated
+  note on D7.
 - **The Archivum can forget (D40).** Recorded history has a retention the consumer declares and a
   redaction procedure, both run by the ledger role alone and both recorded: history is kept in
   time-partitioned tables so that it ages out by the declared rule, and a redaction removes a value and
@@ -218,8 +221,9 @@ phase on.
   no actor identity by default. Recorded as dated notes on D7 and D30.
 - **Freshness may be judged from the data (D41).** Besides the times of Ulduar's own events, Algalon may
   judge a high-water mark the consumer reports as a measurement, and an artifact whose content has not
-  changed for a declared number of runs. Whether a reported high-water mark is allowed for a
-  personal-data class is a reading of D24, decided at Phase 10's sign-off.
+  changed for a declared number of runs. D24 stands for a personal-data class unless Phase 10's
+  sign-off decides otherwise; a project without personal data may store the reported mark. Recorded as
+  a dated note on D24.
 
 ## Status
 
@@ -336,11 +340,11 @@ the artifact kinds (*proposed*: raw file, database dump, report, model, log); wh
 across runs; the connection contract; the ledger's table and step format; how a consumer installs and
 upgrades the Archivum (*proposed*: a library call in Phase 1, a `mimiron` command in Phase 3); the scope
 column and what it is called (D27); what the Archivum's host must offer — reachability from the
-consumer's jobs, TLS, connection limits (D28); the schema-compatibility rule and the ledger lock (D29;
-*proposed*: each library version states the schema versions it supports and refuses any other, and the
-ledger takes an advisory lock); how one project's credential is kept from another project's records (D29;
-*proposed*: one role per project and row-level security); how append-only is enforced (D30; *proposed*:
-insert and select privileges only, plus triggers that refuse an update or a delete); which role applies
+consumer's jobs, TLS, connection limits (D28); how one project's credential is kept from another
+project's records (D29; *proposed*: one role per project and row-level security); how append-only is
+enforced (D30; *proposed*: the recording roles hold insert and select privileges only, and triggers
+refuse their updates and deletes; the ledger role alone passes them, for the retention and redaction of
+D40); which role applies
 the ledger and how it is kept apart from the recording roles (D30); the runtime dependencies this phase
 adds; the Python versions CI tests (*proposed*: every supported release from 3.11 to the newest); the
 configuration file format, moved here from Phase 3 (*proposed*: one TOML file in the consumer's
@@ -348,24 +352,28 @@ repository, read with the standard library, with a version key, unknown keys ref
 given only as names of environment variables); how a shared Archivum is upgraded without locking out
 older clients (D29; *proposed*: each ledger step is declared additive or breaking, the schema records
 the lowest library version it still supports, the library refuses only below it, a breaking step needs
-an explicit flag, and the ledger stores a checksum per applied step); the ledger lock's form
-(*proposed*: a transaction-scoped advisory lock with a lock timeout, safe behind a connection pooler);
-the connection contract's time limits (*proposed*: a connect timeout, a statement timeout and one total
-budget per recording call, D33); read isolation between projects as well as write isolation
-(*proposed*: select policies, row-level security forced on the owner too, truncate revoked and refused,
-the project in every key, and one policy keyed on a membership table so that onboarding a project is not
-a schema change); record identifiers (*proposed*: generated by the client with an idempotency key, so a
+an explicit flag, the ledger stores a checksum per applied step, and it is applied under a
+transaction-scoped advisory lock with a lock timeout, safe behind a connection pooler); the connection
+contract's time limits (*proposed*: a connect timeout, a statement timeout and one total budget per
+recording call, D33); read isolation between projects as well as write isolation (*proposed*: select
+policies, row-level security forced on the owner too, truncate revoked from the recording roles, the
+project in every key, and one policy keyed on a membership table so that onboarding a project is not a
+schema change); record identifiers (*proposed*: generated by the client with an idempotency key, so a
 retried insert is refused, not duplicated; the client's event time and the database's time both stored);
 the lineage edge (*proposed*: it carries an optional run reference from the start, so Phase 4 adds no
 second source of lineage; a guard against cycles; a dataset identified by namespace and name); what an
-artifact's origin may carry (D40); the history retention and redaction records (D40); the server
-versions accepted (*proposed*: the server version is checked at connect and anything but PostgreSQL 18
-is refused with a clear message); the library's logging contract (*proposed*: loggers under the
-package's name, no handler of its own, the root logger never touched); the public exceptions; the
-versioning and deprecation policy, stated in `README.md`; the development toolchain (*proposed*: a
-locked set of development tools, container images pinned by digest, a branch-coverage floor in CI, a
-scheduled dependency and static-analysis scan, a private channel for vulnerability reports named in
-`SECURITY.md`, and a threat-model section there).
+artifact's origin may carry (*proposed*: a path or identifier within the source, never an actor); the
+history retention and redaction records (D40), which history may age out or be redacted (*proposed*:
+deletion, purge and redaction records never do), how history is partitioned in a shared Archivum
+(*proposed*: by project and time), and how a retention or a redaction reaches the object manifests and
+the archived dumps of the Archivum, which would otherwise bring a removed value back (D32); the server
+versions accepted (*proposed*: the server version is checked at connect and anything but PostgreSQL 18 is
+refused with a clear message); the library's logging contract (*proposed*: loggers under the package's
+name, no handler of its own, the root logger never touched); the public exceptions; the versioning and
+deprecation policy, stated in `README.md`; the development toolchain (*proposed*: a locked set of
+development tools, container images pinned by digest, a branch-coverage floor in CI, a scheduled
+dependency and static-analysis scan, a private channel for vulnerability reports named in `SECURITY.md`,
+and a threat-model section there).
 
 ### Phase 2 — Hodir
 
@@ -376,47 +384,46 @@ scheduled dependency and static-analysis scan, a private channel for vulnerabili
 | 3 | Get and restore: fetch by catalog entry; the checksum is verified before a file is handed over (D36). |
 | 4 | Verify: re-read stored objects and compare checksums, in full or by sample; record the result in the Archivum; verification rotates through every object within a declared period (*proposed*). |
 | 5 | Retention: declared classes, a dry-run listing of what a rule would remove, recorded deletion under the retention credential (D35), never interleaved with a put of the same content (D37); an object referenced under several classes is kept by the longest (*proposed*). |
-| 6 | Reconcile: list objects without a catalog entry and catalog entries without an object, and record the result in the Archivum (D31); rebuild catalog entries from object manifests (D32); the built-in rule for what an interrupted put left behind (D38). |
+| 6 | Reconcile: list objects without a catalog entry and catalog entries without an object, and record the result in the Archivum (D31); rebuild catalog entries from object manifests (D32); the built-in rule for what an interrupted put left behind, run under the retention credential (D35, D38). |
 | 7 | Purge: an explicit, recorded removal of an object archived by mistake, under the retention credential (D39). |
 | 8 | Docs and release-notes entry. |
 
 Sign-off: the object key layout with its scope slot (D27); the checksum (*proposed*: SHA-256); the object
 manifest's fields and format (D32) and how it meets deduplication (*proposed*: one manifest per
 registration); the tables that record a verification, a reconciliation and a deletion — Thorim's runs
-arrive only in Phase 4; how an object is streamed to an address known only when the stream ends
-(*proposed*: upload under a temporary key, then a server-side copy), how the temporary object is removed
-and how that reads under D7 and an object lock, and the largest supported object; how "never overwritten"
-is enforced in the store (*proposed*: conditional writes where the backend supports them, a check before
-the write otherwise); retention classes and their defaults (*proposed*: nothing is deleted unless a
-consumer declares a rule) and how they meet deduplication (*proposed*: the longest retention among an
-object's references wins); whether bucket versioning or object lock is required of a consumer's bucket;
-the runtime dependencies this phase adds (*proposed*: the S3 client as an optional extra); what a bucket
-and its credentials must offer so that the store itself refuses an overwrite or a deletion by the
-writing credential (D35; *proposed*: a writing credential without delete rights, a separate retention
-credential, object lock recommended and not required) and the written list of capabilities an
-S3-compatible store must have; how a put from a stream is committed or abandoned (D36); how a put and a
-deletion are kept apart (D37; *proposed*: both take the same lock on scope and content address in the
-Archivum, and the deletion re-checks the object's references under it); the grace period and the record
-of the incomplete-put rule, and that reconcile ignores an object younger than it (D38); the purge
-command and its record (D39); how a file whose size is known is stored (*proposed*: hashed first, then
-written straight to its final key with a conditional write — no temporary object) against a true stream
-(*proposed*: a temporary key and a copy, or a local spool with a declared ceiling), with the part size,
-the behaviour above the size one copy request may carry and the clean-up of unfinished multipart
-uploads; how a deletion is recorded on a versioned or locked bucket (*proposed*: two appended records —
-the intent, then the confirmation once the store shows no version of the key — and only the
+arrive only in Phase 4; retention classes and their defaults (*proposed*: no retention rule exists
+unless a consumer declares one; D38 and D39 are the only other deletions) and how they meet
+deduplication (*proposed*: the longest retention among an object's references wins); the runtime
+dependencies this phase adds (*proposed*: the S3 client as an optional extra); what a bucket and its
+credentials must offer so that the store itself refuses an overwrite or a deletion by the writing
+credential (D35; *proposed*: a writing credential without delete rights, a bucket policy that admits
+only conditional writes or else versioning, a separate retention credential, object lock recommended and
+not required), how that reads for a local directory (*proposed*: file permissions, documented as the
+weaker guarantee), and the written list of capabilities an S3-compatible store must have; how a put from
+a stream is committed or abandoned (D36); how a put and a deletion are kept apart (D37; *proposed*: both
+take the same lock on scope and content address in the Archivum, and the deletion re-checks the object's
+references under it); the grace period and the record of the incomplete-put rule, and that reconcile
+ignores an object younger than it (D38); the purge command, its record and the list of reasons a purge
+may declare (D39); how a file whose size is known is stored (*proposed*: hashed first, then written
+straight to its final key with a conditional write — no temporary object) against a true stream, whose
+address is known only when it ends (*proposed*: a temporary key and a copy, or a local spool with a
+declared ceiling; the temporary object leaves by the rule of D38), with the largest supported object, the
+part size, the behaviour above the size one copy request may carry and the clean-up of unfinished
+multipart uploads; how a deletion is recorded on a versioned or locked bucket (*proposed*: two appended
+records — the intent, then the confirmation once the store shows no version of the key — and only the
 confirmation counts as gone); the retention safeguards (*proposed*: the newest copies of a dataset are
 never deleted by age alone, a run deletes no more than a declared number of objects without an explicit
-flag, a shortened rule applies only after a recorded confirmation, and a scheduled run lists by
-default); whether a retention is fixed when an object is archived or read from the configuration of the
-day; the format's own version (*proposed*: the checksum's algorithm in the key, a format version in the
-object manifest, a write-once marker at the store's root that the library checks, and a plain-text
-description of the layout beside it); where object manifests live so that a rebuild need not list every
-object (*proposed*: under their own time-ordered prefix) and which records beyond catalog entries are
-also written to the store (*proposed*: deletion and purge records); the storage classes accepted
-(*proposed*: immediate retrieval only; no bucket rule may expire or move an archived object); the tests
-of an interrupted and of a concurrent put (*proposed*: one injected failure per step of a put, and two
-connections for put against put and put against deletion — whether a failing wrapper over a real
-backend is allowed under hard rule 9 is the owner's call). Hodir has no client-side encryption (D34).
+flag, a shortened rule applies only after a recorded confirmation, and a scheduled run lists by default);
+whether a retention is fixed when an object is archived or read from the configuration of the day; the
+format's own version (*proposed*: the checksum's algorithm in the key, a format version in the object
+manifest, a write-once marker at the store's root that the library checks, and a plain-text description
+of the layout beside it); where object manifests live so that a rebuild need not list every object
+(*proposed*: under their own time-ordered prefix) and which records beyond catalog entries are also
+written to the store (*proposed*: deletion and purge records); the storage classes accepted (*proposed*:
+immediate retrieval only; no bucket rule may expire or move an archived object); the tests of an
+interrupted and of a concurrent put (*proposed*: one injected failure per step of a put, and two
+connections for put against put and put against deletion — whether a failing wrapper over a real backend
+is allowed under hard rule 9 is the owner's call). Hodir has no client-side encryption (D34).
 
 ### Phase 3 — Mimiron
 
@@ -427,42 +434,41 @@ backend is allowed under hard rule 9 is the owner's call). Hodir has no client-s
 | 3 | Connector: a directory of files (reports, exports, models). |
 | 4 | Connector: `pg_dump` of a database, read-only, streamed into the archive; the same connector archives a dump of the Archivum itself (D32); a dump is committed only when `pg_dump` exits successfully (D36). |
 | 5 | Connector: a Google Drive folder, archiving files that are new or changed since the last run. |
-| 6 | `mimiron doctor`: checks the configuration, the connections and the stores, refuses a consumer-database role that can write (D6) and a writing credential that can delete (D35), and probes the consumer's own bucket for the capabilities Hodir requires (*proposed*). |
+| 6 | `mimiron doctor`: refuses a writing credential that can delete (D35); it also checks the configuration, the connections and the stores, refuses a consumer-database role that can write (D6) and probes the consumer's own bucket for the capabilities Hodir requires (*proposed*). |
 | 7 | A composite GitHub Action that installs Ulduar and runs one `mimiron` command. |
 | 8 | Docs and release-notes entry. |
 
-Sign-off: command names, flags and output layout; exit codes for use in CI; how the Drive connector
-authenticates (*proposed*: the consumer's own service account, read-only scope); where the GitHub Action
-lives; the `pg_dump` format and the check of the client's version against the server's; how
-`mimiron doctor` decides that a role can write; the runtime dependencies this phase adds (*proposed*: the
-Drive client as an optional extra); how a connector to a third-party service is tested — hard rule 9 allows neither a mock
-nor a service beyond the local test services, and Google Drive has no local real server, so the owner
-chooses one of: a test folder owned by this project (an exception to hard rule 9 and to the ask-first
-list), a declared exception to hard rule 9 that allows a recorded or simulated interface for third-party
-services, or the Drive connector moves to Later; whether a connector for a consumer's workflow logs joins
-v0.1 (*proposed*: Later — it meets the same test question); the exit-code contract (*proposed*: a code
-of its own for "could not judge", distinct from a failing verdict and from a usage error) and
-machine-readable output from the first commit (*proposed*: a versioned JSON form of every listing,
-show, verdict and check); how `pg_dump` is run (*proposed*: custom format only, restored with
+Sign-off: command names, flags and output layout; how the Drive connector authenticates (*proposed*: the
+consumer's own service account, read-only scope); where the GitHub Action lives; how `mimiron doctor`
+decides that a role can write; the runtime dependencies this phase adds (*proposed*: the Drive client as
+an optional extra); how a connector to a third-party service is tested — hard rule 9 allows neither a
+mock nor a service beyond the local test services, and Google Drive has no local real server, so the
+owner chooses one of: a test folder owned by this project (an exception to hard rule 9 and to the
+ask-first list), a declared exception to hard rule 9 that allows a recorded or simulated interface for
+third-party services, or the Drive connector moves to Later; whether a connector for a consumer's
+workflow logs joins v0.1 (*proposed*: Later — it meets the same test question); the exit-code contract
+(*proposed*: a code of its own for "could not judge", distinct from a failing verdict and from a usage
+error) and machine-readable output from the first commit (*proposed*: a versioned JSON form of every
+listing, show, verdict and check); how `pg_dump` is run (*proposed*: custom format only, restored with
 `pg_restore` and never fed to a client as a script, the password never on a command line, a minimum
 client version and how a matching client reaches the runner, reference counts recorded at dump time for
 the restore drill); how a consumer installs the package, moved here from Phase 6 because the GitHub
-Action installs it (*proposed*: the Action installs the exact version it was released with, into an
-environment of its own); how credentials reach a connector (*proposed*: through the client's standard
-chain, short-lived identity preferred over a stored key); which role dumps a shared Archivum and into
-which store (D32); whether the storage, connector and notifier interfaces are public and under the
-versioning policy — the adapter D5 names is designed here (*proposed*: small typed protocols, chosen by
-argument; the library is synchronous); the directory connector's handling of links and special files
-(*proposed*: as the local backend, Phase 2); the Drive connector's change rule (*proposed*: the file's
-identifier with its checksum or version; a declared export format for a document that has no bytes of
-its own, or a listing as not archived, never silence; a source deletion recorded; a download checked
-against the source's checksum before it is committed); the operating systems supported.
+Action installs it (*proposed*: the Action installs the code at its own ref into an
+environment of its own; the package index is Phase 6's); how credentials reach a connector (*proposed*:
+through the client's standard chain, short-lived identity preferred over a stored key); which role dumps
+a shared Archivum and into which store (D32); whether the storage, connector and notifier interfaces are
+public and under the versioning policy — the adapter D5 names is designed here (*proposed*: small typed
+protocols, chosen by argument; the library is synchronous); the directory connector's handling of links
+and special files (*proposed*: as the local backend, Phase 2); the Drive connector's change rule
+(*proposed*: the file's identifier with its checksum or version; a declared export format for a document
+that has no bytes of its own, or a listing as not archived, never silence; a source deletion recorded; a
+download checked against the source's checksum before it is committed); the operating systems supported.
 
 ### Phase 4 — Thorim
 
 | Commit | Content |
 |---|---|
-| 1 | Run model: a run of a named job, with start, end, status, and where it ran (workflow, commit), read through a replaceable description of the environment (*proposed*); a run records its job's name, a failure's type and the exit status, never a command line, an environment or a message text (D39). |
+| 1 | Run model: a run of a named job, with start, end, status, and where it ran (workflow, commit), read through a replaceable description of the environment (*proposed*); a run records its job's name, a failure's type and the exit status, never a command line, environment variables or a message text (D39). |
 | 2 | Python API: a context manager that opens and closes a run and records a failure before re-raising; a failure to record is reported and never fails the consumer's job (D33). |
 | 3 | Measurements: named numbers per run (row counts, durations, file counts). |
 | 4 | Inputs and outputs: a run links to the artifacts it read and wrote, feeding Freya's lineage. |
@@ -472,17 +478,16 @@ against the source's checksum before it is committed); the operating systems sup
 Sign-off: the run tables; how a run that never reported its end is represented; the measurement naming
 scheme; what Thorim reads from the GitHub Actions environment; whether a consumer's own check results
 (such as data-quality checks) are stored as measurements or as their own records; how a failure to record
-is reported, and whether unrecorded runs are kept locally and recorded later (D33; *proposed*: a warning
-and a non-zero count in the output, no local queue in v0.1), and that a refused schema version (D29) is
-reported the same way; how the environment a run reports is made replaceable — v0.2's jobs do not run in
-GitHub Actions; the time a recording call may take before it gives up, and that after a first failure a
-run stops trying (D33; *proposed*: the budget of Phase 1's connection contract); how an unrecorded run
-is told from a missed one (*proposed*: a "recording gap" that Algalon reports as such, shown as a
-workflow annotation and in the job summary; whether unrecorded records are spooled to the archive store
-and replayed stays open); the run's identity (*proposed*: a run identifier, a parent run, an attempt
-number, and start, completion, failure and abort as appended events); the client library's version
-recorded on each run, so that a client locked out by an upgrade is visible; that no actor identity is
-recorded unless the consumer asks for it (D40).
+is reported and told from a missed run (D33; *proposed*: a warning, a non-zero count in the output, a
+workflow annotation and a line in the job summary, and a "recording gap" that Algalon reports as such; a
+refused schema version (D29) is reported the same way; whether unrecorded records are spooled to the
+archive store and replayed stays open); how the environment a run reports is made replaceable — v0.2's
+jobs do not run in GitHub Actions; the time a recording call may take before it gives up, and that after
+a first failure a run stops trying (D33; *proposed*: the budget of Phase 1's connection contract); the
+run's identity (*proposed*: a run identifier, a parent run, an attempt number, and start, completion,
+failure and abort as appended events); whether each run records the client library's version (*proposed*:
+yes, so that a client locked out by an upgrade is visible); that no actor identity is recorded unless the
+consumer asks for it (D40).
 
 ### Phase 5 — Algalon
 
@@ -520,7 +525,7 @@ observations at once avoid opening two issues.
 | Commit | Content |
 |---|---|
 | 1 | Adoption guide: installing the package, the configuration file, the storage and database a consumer provides, the credentials and the durability a consumer should arrange (*proposed*). |
-| 2 | End-to-end test: a sample consumer project archived, recorded and observed through its configuration alone; the Archivum is then dropped and recovered from the archive alone, with what is and is not recovered asserted (D32). |
+| 2 | End-to-end test: a sample consumer project archived, recorded and observed through its configuration alone; the Archivum is then dropped and recovered from the archive alone, with what is and is not recovered asserted (D32) (*proposed*). |
 | 3 | Release workflow: built once from the tag, published with a short-lived identity and with provenance (*proposed*). |
 | 4 | v0.1.0 release: version, release notes, this section removed; the scope rules D1–D14 with their dated notes stay in the permanent section (owner decision, 2026-11-23, D22). |
 
@@ -556,7 +561,8 @@ code is built yet.
 They restate the consumers' constraints, which are decided (D23). What a rule adds beyond them is marked
 *proposed* and is confirmed by the owner at the phase sign-off that names it. D1–D13 bind this release,
 D13 with its note of 2026-11-23 (D20); where the reading of another rule is open (D6 in Phase 7, D2 in
-Phase 11), that phase's sign-off says so.
+Phase 11), that phase's sign-off says so. D27–D41 bind it too: the incomplete-put rule (D38) and a
+purge (D39) are recorded deletions beside the declared retention of P5 and P6.
 
 - **Ciphertext only (P1).** A dump is encrypted on the database host before it leaves (in the consumers'
   plans, with one recipient key per database). Ulduar handles ciphertext only for dumps: it receives,
@@ -577,8 +583,8 @@ Phase 11), that phase's sign-off says so.
 - **Per-realm archive, metadata-only Archivum (P3).** A realm's archived objects live in that realm's own
   backup project, under its own storage credential; the Archivum lives in the consumer's management realm
   and holds metadata only (D19). Credentials arrive from the environment at run time (D12). *Proposed*:
-  the storage configuration names one bucket and one credential per realm, and no configuration gives
-  one credential reach into two realms.
+  the storage configuration names one bucket per realm with its writing and its retention credential
+  (D35), and no configuration gives a credential reach into two realms.
 - **Per-tenant separation (P4).** One tenant's archived copies are kept separable from another's (D17).
   *Proposed*: the object key layout and the catalog carry the scopes the consumer declares (for example
   realm, database and, where there is one, tenant), so that a declared tenant's copies can be
@@ -605,9 +611,9 @@ Phase 11), that phase's sign-off says so.
 - **Boundaries unchanged (P9).** The boundaries of D6, D11 and D13 hold, D13 as amended by its note
   (D20). No test, workflow or development session of this repository touches a realm; tests use synthetic
   ciphertext on the local test services (D10). *Proposed*: the package fixes two roles only — the storage
-  boundary (one bucket, one credential) and the unit of separation — and learns from configuration which
-  of a consumer's scopes fill them; "realm" and "tenant" in this section are a consumer's names for
-  them, never names in the package (D5).
+  boundary (one bucket with its credentials, D35) and the unit of separation — and learns from
+  configuration which of a consumer's scopes fill them; "realm" and "tenant" in this section are a
+  consumer's names for them, never names in the package (D5).
 
 ### Phase 7 — Scopes and the catalog
 
@@ -616,7 +622,7 @@ the scopes a consumer declares.
 
 | Commit | Content |
 |---|---|
-| 1 | Configuration: the consumer's declared scopes; one storage configuration per storage boundary (for example a realm), each with its own credential from the environment. |
+| 1 | Configuration: the consumer's declared scopes; one storage configuration per storage boundary (for example a realm), each with its own credentials from the environment (D35). |
 | 2 | Archivum schema change through the ledger: the declared scope levels beyond v0.1's one, data class and the declared encryption of an artifact. |
 | 3 | Field rule: the catalog and run records of a personal-data project accept identifiers, states, counts, sizes, checksums and times of Ulduar's own events (D24) only; enforced and tested. |
 | 4 | Upgrade test: an Archivum installed and filled by v0.1.0 is brought to this release through the ledger, with its records intact. |
@@ -654,9 +660,9 @@ shared — it cannot be separated and ages out by its class); whether collected 
 class (*proposed*: yes, unless the consumer declares otherwise) and, if so, where the consumer encrypts
 them and with which recipient key — P1's key per database does not apply to them; what is required of a
 realm's bucket (versioning, object lock) and how a lock period or a kept version relates to the declared
-retention and to a recorded deletion; whether the `pg_dump` connector is barred from a database that
-holds personal data (P1); how a lock period longer than the declared retention is treated (*proposed*:
-refused, or reported as deletable from a date).
+retention and to a recorded deletion (*proposed*: a lock period longer than the declared retention is
+refused, or reported as deletable from a date); whether the `pg_dump` connector is barred from a
+database that holds personal data (P1).
 
 ### Phase 9 — Retention, deletion and erasure
 
@@ -670,20 +676,20 @@ refused, or reported as deletable from a date).
 
 Sign-off: the retention classes and the recorded-deletion record; how a consumer reports an offboarded
 tenant (*proposed*: a `mimiron` command and a library call run by the consumer's own job); who may run a
-deletion and with which credential; the layout of the erasure evidence; whether a consumer can declare a
-hold that suspends ageing out, and how such a hold is recorded and shown in the erasure evidence
-(*proposed*: yes, as a recorded, dated hold the consumer sets and lifts; whether a hold may delay an
-erasure is the consumer's counsel's call). No retention number and no certificate text is written here:
-both stay with the consumer and its counsel.
+deletion under the retention credential (D35); the layout of the erasure evidence; whether a consumer can
+declare a hold that suspends ageing out, and how such a hold is recorded and shown in the erasure
+evidence (*proposed*: yes, as a recorded, dated hold the consumer sets and lifts; whether a hold may
+delay an erasure is the consumer's counsel's call). No retention number and no certificate text is
+written here: both stay with the consumer and its counsel.
 
 ### Phase 10 — Operations runs and verdicts
 
 | Commit | Content |
 |---|---|
-| 1 | Operations jobs as runs: Thorim records a job of a realm with the P8 fields only; command output is not stored. |
+| 1 | Operations jobs as runs: Thorim records a job of a realm with the P8 fields only; command output is not stored (D39). |
 | 2 | Reported restore verification: the outcome of a drill run inside the realm, and whether the application's post-restore step was reported complete. |
 | 3 | Expectations per realm: backup age, a missed schedule, an overdue restore drill, a copy still present past its retention. |
-| 4 | Verdicts for a consumer's console: a machine-readable form of the `mimiron observe` verdict. |
+| 4 | Verdicts for a consumer's console: v0.1's machine-readable verdict (Phase 3) extended with the realm's expectations. |
 | 5 | Docs and release-notes entry. |
 
 Sign-off: the fields of an operations run; the contract by which a realm reports a restore verification;
@@ -710,7 +716,7 @@ Running Ulduar against a realm is the consumer owner's own run (D11).
 
 Sign-off: which realm is switched on first (*proposed*: a non-production realm); how the consumer
 installs the package; the Archivum's host in the management realm; each realm's bucket and storage
-credential; which of the candidates above it adopts first; where Ulduar runs for a realm (D2 names a
+credentials; which of the candidates above it adopts first; where Ulduar runs for a realm (D2 names a
 consumer's GitHub Actions; an operations platform's jobs run on its own servers); that CI tests the first
 personal-data consumer's Python version — the versions CI tests are set at Phase 1's sign-off.
 
