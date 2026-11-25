@@ -55,10 +55,10 @@ Enforced: C4.
   is written to the Archivum before the object goes, the deletion runs under the retention credential,
   and the credential that writes cannot delete (D35). No other code path deletes from the archive.
 - Recorded history — catalog entries, lineage edges, runs, measurements, verifications, verdicts — is
-  append-only: a correction, a failure, a re-run and a retention action are new records. No recording
-  role can issue `UPDATE`, `DELETE` or `TRUNCATE` against a history table, and no migration of the
-  Archivum rewrites existing rows. History leaves only by the retention the consumer declared or by a
-  recorded redaction, both run by the ledger role alone (D40).
+  append-only: a correction, a failure, a re-run and a retention action are new records. No code path
+  issues `UPDATE`, `DELETE` or `TRUNCATE` against a history table except the retention the consumer
+  declared and the recorded redaction, which the ledger role alone runs (D40); the recording roles cannot
+  (D30). No migration of the Archivum rewrites existing rows.
 
 Enforced: review until the stores exist; Phases 1 and 2 add tests that the Archivum and the storage
 interface refuse both.
@@ -97,7 +97,7 @@ Enforced: the docs-sync guard (commit-msg hook, verify, and CI where its check i
 - Behaviour that touches the database is tested against PostgreSQL 18, and behaviour that touches the
   archive against an S3-compatible server (and a real directory for the local backend) — never a mock,
   a stub client or another engine.
-- A third-party API with no local real server (Google Drive, the GitHub API) is the one exception: it is
+- A third-party service with no local real server (Google Drive, the GitHub interface) is the one exception: it is
   tested against a local simulated server built from recorded real responses and reached through a
   fixture like any service (`ROADMAP.md` D42). The exception never covers the database or the archive.
 - Tests reach the services only through the fixtures of `tests/conftest.py`, or a conftest helper fed a
@@ -169,7 +169,8 @@ when a targeted change suffices, no touching unrelated code in a PR; surface nea
   swallow. A failed write leaves no catalog entry for an object that was not stored, and no stored
   object without its catalog entry being retried or reported. Re-wrap with `raise … from e`.
   The one exception is a run's recording path: a failure to record is reported and never raised into the
-  consumer's job (`ROADMAP.md` D33).
+  consumer's job, while a command whose purpose is the archive or the verdict still fails with its own
+  exit code (`ROADMAP.md` D33).
 - **Integrity:** a checksum mismatch is never retried away or downgraded to a warning; it is recorded
   and raised.
 - **Inputs:** validate early (an unknown project, an empty path, a missing configuration key) and fail

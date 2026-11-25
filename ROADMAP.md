@@ -15,8 +15,9 @@ whose section follows v0.1's (v0.2 — Personal data). v0.1 stays as approved. E
 is *proposed* until the owner confirms it, unless it restates one of those decisions.
 
 Decided by the owner on 2026-11-25, in the roadmap review held before Phase 1 and in two independent
-reviews that followed it: decisions D27–D42 and the phase amendments that follow from them. An amendment
-that is not one of those decisions is *proposed* and is confirmed at its phase's sign-off.
+reviews that followed it: decisions D27–D41, D42 on a question they left open, and the phase amendments
+that follow from them. An amendment that is not one of those decisions is *proposed* and is confirmed at
+its phase's sign-off.
 
 ## Why
 
@@ -162,8 +163,7 @@ confirmed the same day in the review of the pull request that added the personal
 
 Taken in the roadmap review held before Phase 1 (D27–D34) and in two independent reviews of the amended
 roadmap (D35–D41), and D42, taken the same day on the question Phase 3's sign-off had left open.
-D27–D32 and D35–D40 shape the Archivum schema and the object layout from the first
-phase on.
+D27–D32 and D35–D40 shape the Archivum schema and the object layout from the first phase on.
 
 - **A scope slot from the start (D27).** The Archivum schema (Phase 1) and the object key
   layout (Phase 2) carry a scope from v0.1 on, with a single level. v0.2 fills and extends that slot
@@ -230,7 +230,8 @@ phase on.
 - **A third-party service is tested against a local simulated server (D42).** A service outside Ulduar's
   two stores that has no local real server — Google Drive, the GitHub interface — is tested against a
   simulated server on the local machine, built from recorded real responses. This is the one exception to
-  D10; it never covers PostgreSQL or the archive store, and no test connects to the real service (D11).
+  D10; it never covers PostgreSQL or the archive store, and no test connects to the real service (hard
+  rule 9).
   Recorded as a dated note on D10.
 
 ## Status
@@ -373,14 +374,16 @@ artifact's origin may carry (*proposed*: a path or identifier within the source,
 history retention and redaction records (D40), which history may age out or be redacted (*proposed*:
 deletion, purge and redaction records never do), how history is partitioned in a shared Archivum
 (*proposed*: by project and time), and how a retention or a redaction reaches the object manifests and
-the archived dumps of the Archivum, which would otherwise bring a removed value back (D32); the server
-versions accepted (*proposed*: the server version is checked at connect and an unsupported one is refused
-with a clear message; PostgreSQL 19 is now released, and whether it joins 18 is the owner's call under
-D8); the library's logging contract (*proposed*: loggers under the package's name, no handler of its own,
-the root logger never touched); the public exceptions; the versioning and deprecation policy, stated in
-`README.md`; the development toolchain (*proposed*: a locked set of development tools, container images
-pinned by digest, a branch-coverage floor in CI, a scheduled dependency and static-analysis scan, a
-private channel for vulnerability reports named in `SECURITY.md`, and a threat-model section there).
+the archived dumps of the Archivum, which would otherwise bring a removed value back (D32), and how
+creating and dropping time partitions at run time reads under hard rule 7; the server versions accepted
+(*proposed*: the server version is checked at connect and an unsupported one is refused with a clear
+message; PostgreSQL 19 was reported released on 2026-11-19, and whether it joins 18 is the owner's call
+under D8); the library's logging contract (*proposed*: loggers under the package's name, no handler of
+its own, the root logger never touched); the public exceptions; the versioning and deprecation policy,
+stated in `README.md`; the development toolchain (*proposed*: a locked set of development tools,
+container images pinned by digest, a branch-coverage floor in CI, a scheduled dependency and
+static-analysis scan, a private channel for vulnerability reports named in `SECURITY.md`, and a
+threat-model section there).
 
 ### Phase 2 — Hodir
 
@@ -429,7 +432,8 @@ prefix) and which records beyond catalog entries are also written to the store (
 purge records); the storage classes accepted (*proposed*: immediate retrieval only; no bucket rule may
 expire or move an archived object); whether a copy still passes where a bucket policy enforces
 conditional writes, tested before the stream path is fixed; the object store the tests run on, whose
-upstream project is reported archived (S5); the tests of an interrupted and of a concurrent put
+upstream project was reported archived in 2026 (Phase 0's S5); the tests of an interrupted and of a
+concurrent put
 (*proposed*: one injected failure per step of a put, and two connections for put against put and put
 against deletion — whether a failing wrapper over a real backend is allowed under hard rule 9 is the
 owner's call). Hodir has no client-side encryption (D34).
@@ -515,17 +519,16 @@ restore drill may run (*proposed*: only a throwaway local instance, never a cons
 issue format and labels; the heartbeat's form (*proposed*: a request to a URL the consumer declares, sent
 whatever the verdict); the simulated server the GitHub-issue notifier is tested against (D42); a
 verdict level for an expectation that could not be evaluated (*proposed*: its own non-passing level and
-exit code, never shown as passing); the baseline of a tolerance (*proposed*: the
-last declared number of passing runs, a declared minimum, median-based); a grace period per schedule;
-when an issue is reopened and how a consumer silences an expectation (*proposed*: a recorded, dated
-silence, like Phase 9's hold); further vault-health expectations (*proposed*: a deletion intent without
-its confirmation, the age of the oldest unverified object, the age of the Archivum's own dump, a
-recording gap); the restore drill's safeguards (*proposed*: a disposable instance of the same major
-version reached only at a local address, a role that is no superuser, no owner or privilege statements
-restored, no credential in the drill's environment, a declared largest dump and a non-passing "not
-drilled" above it); how a notifier's address is kept out of the configuration and the logs (*proposed*:
-the configuration names an environment variable, and a logged address is redacted), and how two
-observations at once avoid opening two issues.
+exit code, never shown as passing); the baseline of a tolerance (*proposed*: the last declared number of
+passing runs, a declared minimum, median-based); a grace period per schedule; when an issue is reopened
+and how a consumer silences an expectation (*proposed*: a recorded, dated silence, like Phase 9's hold);
+further vault-health expectations (*proposed*: a deletion intent without its confirmation, the age of the
+oldest unverified object, the age of the Archivum's own dump, a recording gap); the restore drill's
+safeguards (*proposed*: a disposable instance of the same major version reached only at a local address,
+a role that is no superuser, no owner or privilege statements restored, no credential in the drill's
+environment, a declared largest dump and a non-passing "not drilled" above it); how a notifier's address
+is kept out of the configuration and the logs (*proposed*: the configuration names an environment
+variable, and a logged address is redacted), and how two observations at once avoid opening two issues.
 
 ### Phase 6 — First adoption and release
 
