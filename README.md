@@ -13,9 +13,6 @@ component arrives in Phase 1. `ROADMAP.md` holds the plan and its status.
 Named after the keepers and watchers of Ulduar, the titan vault in Warcraft lore. Each arrives in its
 roadmap phase.
 
-The name is a homage. Project Ulduar is not affiliated with, endorsed by or sponsored by Blizzard
-Entertainment; Warcraft and Ulduar are trademarks of Blizzard Entertainment, Inc.
-
 | Component | Role | Phase |
 |---|---|---|
 | **Freya** | Catalog and lineage; its database is the Archivum | 1 |
@@ -23,6 +20,9 @@ Entertainment; Warcraft and Ulduar are trademarks of Blizzard Entertainment, Inc
 | **Mimiron** | The `mimiron` CLI, connectors and the GitHub Action | 3 |
 | **Thorim** | Run ledger | 4 |
 | **Algalon** | Monitoring: verdicts and alerts | 5 |
+
+The name is a homage. Project Ulduar is not affiliated with, endorsed by or sponsored by Blizzard
+Entertainment; Warcraft is a trademark of Blizzard Entertainment, Inc.
 
 ## Install
 

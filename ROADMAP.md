@@ -24,7 +24,7 @@ The gaps of a typical data project, as surveyed on 2026-11-22:
 
 | Gap | Today | Addressed in |
 |---|---|---|
-| Run history | No runs, timings or row counts are recorded; workflow logs expire after 30 days. | Phase 4; archiving workflow logs: Later |
+| Run history | No runs, timings or row counts are recorded; workflow logs expire after 30 days. | Phase 4; archiving workflow logs: Phase 3 sign-off (*proposed*: Later) |
 | Archive | Database dumps live 14 days as CI artifacts; a shared drive holds the only copy of the raw files; reports and trained models are not kept. | Phases 2–3 |
 | Monitoring | Freshness is printed, never judged; nothing checks volume drift or missed runs; no dump has its restore verified. | Phase 5 |
 | Catalog and lineage | None. | Phase 1 |
@@ -105,14 +105,17 @@ confirmed the same day in the review of the pull request that added the personal
   verification; Algalon judges backup age, missed schedules and overdue restore drills, shown in the
   consumer's own console.
 - **A personal-data release (D17).** That use includes dumps of applications that hold personal data.
-  Before any such data is archived, Ulduar needs required client-side encryption, per-tenant
-  separation, declared retention, and recorded deletion and erasure. This release is added to the
-  roadmap for them, and D14 is lifted only for it.
+  Before any such data is archived, Ulduar needs required client-side encryption, per-tenant separation,
+  declared retention, and recorded deletion and erasure. This release is added to the roadmap for them,
+  and D14 is lifted only for it.
+  *Amended 2026-11-25 (D34):* the client is the consumer — it encrypts before Ulduar receives the object;
+  Hodir encrypts nothing.
 - **Not on the critical path (D18).** The consumer writes dumps, encrypted on the database host, to each
   realm's own object-locked bucket first; the hand-over to Ulduar's archive is switched on per realm
   later and is never a condition for a realm to hold real data. Ulduar blocks no consumer.
-  *Amended 2026-11-25 (D33):* the same holds in v0.1 for every consumer: a failure to record never fails a
-  consumer's job.
+  *Amended 2026-11-25 (D33):* the same holds in v0.1 for every consumer: a failure to record never fails
+  a consumer's job; a command whose purpose is the archive or the verdict still fails with its own exit
+  code.
 - **The archive is per realm (D19).** A realm is one environment of one application (for example
   `app/uat`). Each realm's archived objects live in that realm's own backup project — its own bucket and
   its own storage credential — so one environment's credential cannot reach another's backups. The
@@ -153,33 +156,35 @@ confirmed the same day in the review of the pull request that added the personal
 Taken in the roadmap review held before Phase 1. D27–D32 shape the Archivum schema and the object layout
 from the first phase on.
 
-- **A scope slot from the start (D27).** The Archivum schema (Phase 1) and the object key layout (Phase 2)
-  carry a scope from v0.1 on, with a single level. v0.2 fills and extends that slot (Phases 7–8); no
-  archived object is ever moved or re-keyed to make room for it (D7).
-- **The Archivum is hosted by the consumer (D28).** D2's "nothing to host" covers Ulduar's own code, not its
-  database: the Archivum is a PostgreSQL 18 database the consumer provides, keeps online and makes
-  reachable from where its jobs run. What that requires — reachability, TLS, connection limits — is decided
-  at Phase 1's sign-off, not at adoption. Recorded as a dated note on D2.
-- **A shared Archivum is safe to share (D29).** One Archivum may serve several projects on different Ulduar
-  versions. The library refuses to work against a schema version it does not support; the schema ledger is
-  applied under a lock, so two jobs never apply it at once; one project's credential cannot write another
-  project's records.
+- **A scope slot from the start (D27).** The Archivum schema (Phase 1) and the object key
+  layout (Phase 2) carry a scope from v0.1 on, with a single level. v0.2 fills and extends that slot
+  (Phases 7–8); no archived object is ever moved or re-keyed to make room for it (D7).
+- **The Archivum is hosted by the consumer (D28).** D2's "nothing to host" covers Ulduar's own code, not
+  its database: the Archivum is a PostgreSQL 18 database the consumer provides, keeps online and makes
+  reachable from where its jobs run. What that requires — reachability, TLS, connection limits — is
+  decided at Phase 1's sign-off, not at adoption. Recorded as a dated note on D2.
+- **A shared Archivum is safe to share (D29).** One Archivum may serve several projects on different
+  Ulduar versions. The library refuses to work against a schema version it does not support; the schema
+  ledger is applied under a lock, so two jobs never apply it at once; one project's credential cannot
+  write another project's records.
 - **Append-only, enforced by the database (D30).** D7 is enforced in the Archivum itself, not only in the
   library: recorded history is modelled as appended records (a run's end is a new record, not an update),
   and the roles Ulduar connects with cannot update or delete it.
-- **The two stores are reconciled (D31).** A put has a fixed write order, so that an interrupted put leaves
-  at worst an object without a catalog entry, never an entry without an object. Ulduar can list both kinds
-  of disagreement between the archive store and the Archivum, and Algalon judges the result.
-- **The archive outlives the Archivum (D32).** Every archived object is stored with a small manifest beside
-  it, from which its catalog entry can be rebuilt; Ulduar archives a dump of the Archivum itself. A
-  manifest carries nothing the catalog may not carry (P8).
+- **The two stores are reconciled (D31).** A put has a fixed write order, so that an interrupted put
+  leaves at worst an object without a catalog entry, never an entry without an object. Ulduar can list
+  both kinds of disagreement between the archive store and the Archivum, and Algalon judges the result.
+- **The archive outlives the Archivum (D32).** Every archived object is stored with a small object
+  manifest beside it, from which its catalog entry can be rebuilt; Ulduar archives a dump of the Archivum
+  itself. An object manifest carries nothing the catalog may not carry (D23, D24).
 - **Recording never fails a consumer's job (D33).** When the Archivum or the archive store cannot be
-  reached, a run still runs and exits with its own status; the failure to record is reported, never raised
-  into the consumer's job. A command whose purpose is the archive or the verdict (`mimiron archive put`,
-  `mimiron observe`) still fails with its own exit code. Recorded as a dated note on D18.
-- **The consumer encrypts, never Hodir (D34).** Hodir has no client-side encryption of its own, in v0.1 or
-  later: an object that must be encrypted is encrypted by the consumer before Ulduar receives it (P1), and
-  encryption at rest is the bucket's. The optional client-side encryption proposed for Phase 2 is dropped.
+  reached, a run still runs and exits with its own status; the failure to record is reported, never
+  raised into the consumer's job. A command whose purpose is the archive or the verdict
+  (`mimiron archive put`, `mimiron observe`) still fails with its own exit code. Recorded as a dated note
+  on D18.
+- **The consumer encrypts, never Hodir (D34).** Hodir has no client-side encryption of its own, in v0.1
+  or later: an object that must be encrypted is encrypted by the consumer before Ulduar receives it
+  (D23), and encryption at rest is the bucket's. The optional client-side encryption proposed for Phase 2
+  is dropped.
 
 ## Status
 
@@ -206,7 +211,8 @@ is merged. Kick-off prompt: "Implement Phase N of `ROADMAP.md` following its Run
 1. **Read.** This file, then `CLAUDE.md` and the development skill (both exist from Phase 0 on).
 2. **Sign-off first.** Present the phase's sign-off items to the owner as concrete proposals (table
    layouts, signatures, CLI output samples, configuration samples) and wait for confirmation before
-   writing code. Record each confirmed decision under the phase, dated, in the phase's first commit.
+   writing code. Record each confirmed decision under the phase, dated, in the phase's first commit. The
+   sign-off also names every runtime dependency the phase adds.
 3. **Implement.** One commit per table row, in order, each passing the verify command.
 4. **Review.** The `reviewer` agent reviews the whole phase diff before the pull request opens; its
    findings are fixed in further commits and reviewed again.
@@ -217,10 +223,9 @@ is merged. Kick-off prompt: "Implement Phase N of `ROADMAP.md` following its Run
    removes that release's section from this file.
 6. **Stay in scope.** The scope rules bind every phase. A phase that finds an agreed item infeasible, or
    needs something not listed here, stops and asks the owner; it never narrows or widens scope itself.
-7. **Exit criteria.** A phase is done when every table row is committed, the verify command passes with the
-   test services up, the `reviewer`'s findings are closed, the docs and the release-notes entry are in,
-   every sign-off decision is recorded, dated, under the phase, and the runtime dependencies the phase
-   adds were named at its sign-off.
+7. **Exit criteria.** A phase is done when every table row is committed, the verify command passes with
+   the test services up, the `reviewer`'s findings are closed, the docs and the release-notes entry are
+   in, and every sign-off decision is recorded, dated, under the phase.
 
 *Proposed*: Phase 7 starts only when v0.1.0 is tagged. Phases 7–11 change ask-first items of `CLAUDE.md`
 (the Archivum schema, the object layout, the CLI and configuration surface, archive deletion and
@@ -290,40 +295,43 @@ confirmed MinIO image proved unavailable):
 | 5 | Docs and release-notes entry. |
 
 Sign-off: the Archivum's tables and columns; whether it is its own database or a schema inside a
-consumer's (*proposed*: its own database, so one Archivum serves several projects); the artifact kinds
-(*proposed*: raw file, database dump, report, model, log); what identifies a dataset across runs; the
-connection contract; the ledger's table and step format; how a consumer installs and upgrades the
-Archivum (*proposed*: a library call in Phase 1, a `mimiron` command in Phase 3); the scope column and
-what it is called (D27); what the Archivum's host must offer — reachability from the consumer's jobs, TLS,
-connection limits (D28); the schema-compatibility rule and the ledger lock (D29; *proposed*: each
-library version states the schema versions it supports and refuses any other, and the ledger takes an
-advisory lock); how one project's credential is kept from another project's records (D29; *proposed*: one role per project and
-row-level security); how append-only is enforced (D30; *proposed*: insert and select privileges only, plus
-triggers that refuse an update or a delete); the runtime dependencies this phase adds; the Python versions
-CI tests (*proposed*: every supported release from 3.11 to the newest).
+consumer's (*proposed*: its own database — D29 presumes that one Archivum may serve several projects);
+the artifact kinds (*proposed*: raw file, database dump, report, model, log); what identifies a dataset
+across runs; the connection contract; the ledger's table and step format; how a consumer installs and
+upgrades the Archivum (*proposed*: a library call in Phase 1, a `mimiron` command in Phase 3); the scope
+column and what it is called (D27); what the Archivum's host must offer — reachability from the
+consumer's jobs, TLS, connection limits (D28); the schema-compatibility rule and the ledger lock (D29;
+*proposed*: each library version states the schema versions it supports and refuses any other, and the
+ledger takes an advisory lock); how one project's credential is kept from another project's records (D29;
+*proposed*: one role per project and row-level security); how append-only is enforced (D30; *proposed*:
+insert and select privileges only, plus triggers that refuse an update or a delete); which role applies
+the ledger and how it is kept apart from the recording roles (D30); the runtime dependencies this phase
+adds; the Python versions CI tests (*proposed*: every supported release from 3.11 to the newest).
 
 ### Phase 2 — Hodir
 
 | Commit | Content |
 |---|---|
 | 1 | Storage interface with two backends: a local directory and an S3-compatible bucket; both refuse to overwrite an existing key. |
-| 2 | Put: stream an object in, checksum it, store it under its content address inside its scope (D27) with its manifest beside it (D32), then register it with Freya — in that order (D31); an identical object is stored once. |
+| 2 | Put: stream an object in, checksum it, store it under its content address inside its scope (D27) with its object manifest beside it (D32), then register it with Freya — in that order (D31); an identical object is stored once within its scope. |
 | 3 | Get and restore: fetch by catalog entry, verify the checksum on the way out. |
 | 4 | Verify: re-read stored objects and compare checksums, in full or by sample; record the result in the Archivum. |
-| 5 | Retention: declared classes, a dry-run listing of what a rule would remove, recorded deletion; an object referenced under several classes is kept by the longest. |
-| 6 | Reconcile: list objects without a catalog entry and catalog entries without an object (D31); rebuild catalog entries from manifests (D32). |
+| 5 | Retention: declared classes, a dry-run listing of what a rule would remove, recorded deletion; an object referenced under several classes is kept by the longest (*proposed*). |
+| 6 | Reconcile: list objects without a catalog entry and catalog entries without an object, and record the result in the Archivum (D31); rebuild catalog entries from object manifests (D32). |
 | 7 | Docs and release-notes entry. |
 
-Sign-off: the object key layout with its scope slot (D27); the checksum (*proposed*: SHA-256); the
-manifest's fields and format (D32); the tables that record a verification and a deletion — Thorim's runs
+Sign-off: the object key layout with its scope slot (D27); the checksum (*proposed*: SHA-256); the object
+manifest's fields and format (D32) and how it meets deduplication (*proposed*: one manifest per
+registration); the tables that record a verification, a reconciliation and a deletion — Thorim's runs
 arrive only in Phase 4; how an object is streamed to an address known only when the stream ends
-(*proposed*: upload under a temporary key, then a server-side copy) and the largest supported object; how
-"never overwritten" is enforced in the store (*proposed*: conditional writes where the backend supports
-them, a check before the write otherwise); retention classes and their defaults (*proposed*: nothing is
-deleted unless a consumer declares a rule) and how they meet deduplication (*proposed*: the longest
-retention among an object's references wins); whether bucket versioning or object lock is required of a
-consumer's bucket; the runtime dependencies this phase adds (*proposed*: the S3 client as an optional
-extra). Hodir has no client-side encryption (D34).
+(*proposed*: upload under a temporary key, then a server-side copy), how the temporary object is removed
+and how that reads under D7 and an object lock, and the largest supported object; how "never overwritten"
+is enforced in the store (*proposed*: conditional writes where the backend supports them, a check before
+the write otherwise); retention classes and their defaults (*proposed*: nothing is deleted unless a
+consumer declares a rule) and how they meet deduplication (*proposed*: the longest retention among an
+object's references wins); whether bucket versioning or object lock is required of a consumer's bucket;
+the runtime dependencies this phase adds (*proposed*: the S3 client as an optional extra). Hodir has no
+client-side encryption (D34).
 
 ### Phase 3 — Mimiron
 
@@ -331,41 +339,43 @@ extra). Hodir has no client-side encryption (D34).
 |---|---|
 | 1 | `mimiron` CLI skeleton, configuration loading, console helpers, exit codes. |
 | 2 | `mimiron archive put / get / list / verify / reconcile` and `mimiron catalog show / lineage`. |
-| 3 | `mimiron doctor`: checks the configuration, the connections and the stores, and refuses a consumer-database role that can write (D6). |
-| 4 | Connector: a directory of files (reports, exports, models). |
-| 5 | Connector: `pg_dump` of a database, read-only, streamed into the archive; the same connector archives a dump of the Archivum itself (D32). |
-| 6 | Connector: a Google Drive folder, archiving files that are new or changed since the last run. |
+| 3 | Connector: a directory of files (reports, exports, models). |
+| 4 | Connector: `pg_dump` of a database, read-only, streamed into the archive; the same connector archives a dump of the Archivum itself (D32). |
+| 5 | Connector: a Google Drive folder, archiving files that are new or changed since the last run. |
+| 6 | `mimiron doctor`: checks the configuration, the connections and the stores, and refuses a consumer-database role that can write (D6) (*proposed*). |
 | 7 | A composite GitHub Action that installs Ulduar and runs one `mimiron` command. |
 | 8 | Docs and release-notes entry. |
 
-Sign-off: command names, flags and output layout; exit codes for use in CI; the configuration file
-format (*proposed*: one TOML file in the consumer's repository); how the Drive connector authenticates
+Sign-off: command names, flags and output layout; exit codes for use in CI; the configuration file format
+(*proposed*: one TOML file in the consumer's repository); how the Drive connector authenticates
 (*proposed*: the consumer's own service account, read-only scope); where the GitHub Action lives; the
 `pg_dump` format and the check of the client's version against the server's; how `mimiron doctor` decides
 that a role can write; the runtime dependencies this phase adds (*proposed*: the Drive client as an
-optional extra); **how a connector to a third-party service is tested** — hard rule 9 allows no mock and
-D11 no system beyond the local test services, and Google Drive has no local real server, so the owner
-chooses one of: a test folder owned by this project (an exception to the ask-first list), a declared
-exception to hard rule 9 for third-party interfaces, or the Drive connector moves to Later; whether a
-connector for a consumer's workflow logs joins v0.1 (*proposed*: Later — it meets the same test question).
+optional extra); how a connector to a third-party service is tested — hard rule 9 allows neither a mock
+nor a service beyond the local test services, and Google Drive has no local real server, so the owner
+chooses one of: a test folder owned by this project (an exception to hard rule 9 and to the ask-first
+list), a declared exception to hard rule 9 that allows a recorded or simulated interface for third-party
+services, or the Drive connector moves to Later; whether a connector for a consumer's workflow logs joins
+v0.1 (*proposed*: Later — it meets the same test question).
 
 ### Phase 4 — Thorim
 
 | Commit | Content |
 |---|---|
-| 1 | Run model: a run of a named job, with start, end, status, and where it ran (workflow, commit), read through a replaceable description of the environment. |
+| 1 | Run model: a run of a named job, with start, end, status, and where it ran (workflow, commit), read through a replaceable description of the environment (*proposed*). |
 | 2 | Python API: a context manager that opens and closes a run and records a failure before re-raising; a failure to record is reported and never fails the consumer's job (D33). |
 | 3 | Measurements: named numbers per run (row counts, durations, file counts). |
 | 4 | Inputs and outputs: a run links to the artifacts it read and wrote, feeding Freya's lineage. |
 | 5 | `mimiron run -- <command>`: wrap any command as a recorded run; `mimiron runs list / show`. |
 | 6 | Docs and release-notes entry. |
 
-Sign-off: the run tables; how a run that never reported its end is represented; the measurement
-naming scheme; what Thorim reads from the GitHub Actions environment; whether a consumer's own check
-results (such as data-quality checks) are stored as measurements or as their own records; how a failure
-to record is reported, and whether unrecorded runs are kept locally and recorded later (D33; *proposed*: a
-warning and a non-zero count in the output, no local queue in v0.1); how the environment a run reports is
-made replaceable — v0.2's jobs do not run in GitHub Actions.
+Sign-off: the run tables; how a run that never reported its end is represented; the measurement naming
+scheme; what Thorim reads from the GitHub Actions environment; whether a consumer's own check results
+(such as data-quality checks) are stored as measurements or as their own records; how a failure to record
+is reported, and whether unrecorded runs are kept locally and recorded later (D33; *proposed*: a warning
+and a non-zero count in the output, no local queue in v0.1), and that a refused schema version (D29) is
+reported the same way; how the environment a run reports is made replaceable — v0.2's jobs do not run in
+GitHub Actions.
 
 ### Phase 5 — Algalon
 
@@ -376,8 +386,8 @@ made replaceable — v0.2's jobs do not run in GitHub Actions.
 | 3 | Volume: a measurement outside a declared range, or outside a tolerance of its own recent history. |
 | 4 | Vault health: the newest dump older than allowed; an integrity verification overdue or failed; a disagreement between the archive store and the Archivum (D31). |
 | 5 | Restore drill: restore the newest dump into a scratch database and record whether it loads and what it holds. |
-| 6 | `mimiron observe`: one verdict table, exit codes, the verdict recorded as history, and the same verdict as markdown in the workflow's job summary. |
-| 7 | Notifiers: a GitHub issue per failing expectation, opened once and closed on recovery; a generic webhook; a heartbeat sent on every completed observation, so that an observer that stopped running is noticed elsewhere. |
+| 6 | `mimiron observe`: one verdict table, exit codes, the verdict recorded as history, and the same verdict as markdown in the workflow's job summary where the environment offers one (*proposed*). |
+| 7 | Notifiers: a GitHub issue per failing expectation, opened once and closed on recovery; a generic webhook; a heartbeat sent on every completed observation, so that an observer that stopped running is noticed elsewhere (*proposed*). |
 | 8 | Docs and release-notes entry. |
 
 Sign-off: the expectation vocabulary and its configuration layout; default thresholds (*proposed*:
@@ -414,7 +424,7 @@ copies separable where the consumer declares a tenant, every copy under a declar
 deletion recorded. An operations platform is the first such consumer, not the design target. v0.1 stays
 as approved, with no personal data (D14).
 
-Everything in this section that does not restate an owner decision (D15–D26) is *proposed*: the starting
+Everything in this section that does not restate an owner decision (D15–D34) is *proposed*: the starting
 position, to be confirmed by the owner in the review of the pull request that added this section or at a
 phase's sign-off. A confirmed item loses its *proposed* mark and is recorded, dated; a confirmed scope
 rule takes a D number and moves to the permanent section. A merge alone confirms none of them. No product
@@ -480,13 +490,13 @@ Phase 11), that phase's sign-off says so.
 
 ### Phase 7 — Scopes and the catalog
 
-v0.1 already carries one scope level in the schema and the object keys (D27); this phase extends it to the
-scopes a consumer declares.
+v0.1 already carries one scope level in the schema and the object keys (D27); this phase extends it to
+the scopes a consumer declares.
 
 | Commit | Content |
 |---|---|
 | 1 | Configuration: the consumer's declared scopes; one storage configuration per storage boundary (for example a realm), each with its own credential from the environment. |
-| 2 | Archivum schema change through the ledger: scope, data class and the declared encryption of an artifact. |
+| 2 | Archivum schema change through the ledger: the declared scope levels beyond v0.1's one, data class and the declared encryption of an artifact. |
 | 3 | Field rule: the catalog and run records of a personal-data project accept identifiers, states, counts, sizes, checksums and times of Ulduar's own events (D24) only; enforced and tested. |
 | 4 | Upgrade test: an Archivum installed and filled by v0.1.0 is brought to this release through the ledger, with its records intact. |
 | 5 | Docs and release-notes entry. |
@@ -502,7 +512,8 @@ how D6 reads in either case; where the Archivum runs in the management realm and
 how an opaque tenant identifier is handled if the consumer's counsel treats it as personal data; whether
 Ulduar catalogs or ignores the small integrity records an application writes to the export location a
 realm offers in its backup project, for example an audit chain head (*proposed*: catalogs them by
-identifier, size and the checksum the application supplies, never reading them).
+identifier, size and the checksum the application supplies, never reading them); where the Archivum's own
+dump (D32) is stored when the archive is per realm (D19).
 
 ### Phase 8 — Ciphertext and separation
 
@@ -515,14 +526,15 @@ identifier, size and the checksum the application supplies, never reading them).
 
 Sign-off: the encryption scheme the consumer uses and whether Ulduar handles public keys — private keys
 never, as P1 decides (*proposed*: no public keys either; it records only the format and the recipient-key
-identifier the consumer declares; the consumer encrypts, never Hodir (D34)); how Hodir recognises
-ciphertext (*proposed*: the declared format plus a check of the format's header, no decryption); the per-tenant object key layout; how a copy that holds
-several tenants' data is recorded (*proposed*: as shared — it cannot be separated and ages out by its
-class); whether collected logs are a personal-data class (*proposed*: yes, unless the consumer declares
-otherwise) and, if so, who encrypts them, where and with which recipient key — P1's key per database does
-not apply to them; what is required of a realm's bucket (versioning, object lock) and how a lock period
-or a kept version relates to the declared retention and to a recorded deletion; whether the `pg_dump`
-connector is barred from a database that holds personal data (P1).
+identifier the consumer declares); the consumer encrypts, never Hodir (D34); how Hodir recognises
+ciphertext (*proposed*: the declared format plus a check of the format's header, no decryption); the
+per-tenant object key layout; how a copy that holds several tenants' data is recorded (*proposed*: as
+shared — it cannot be separated and ages out by its class); whether collected logs are a personal-data
+class (*proposed*: yes, unless the consumer declares otherwise) and, if so, where the consumer encrypts
+them and with which recipient key — P1's key per database does not apply to them; what is required of a
+realm's bucket (versioning, object lock) and how a lock period or a kept version relates to the declared
+retention and to a recorded deletion; whether the `pg_dump` connector is barred from a database that
+holds personal data (P1).
 
 ### Phase 9 — Retention, deletion and erasure
 
@@ -589,7 +601,8 @@ In no planned release; each is an owner decision when its time comes.
 - Adoption by further consumers once their hosting exists.
 - Column-level lineage; statistical anomaly detection beyond declared ranges and tolerances.
 - More connectors (an HTTP API source, a second database engine); a PostgreSQL version matrix.
-- A connector for a consumer's workflow logs, which expire after 30 days today.
+- A connector for a consumer's workflow logs, which expire after 30 days today — unless Phase 3's
+  sign-off takes it into v0.1.
 - Schema snapshots: the consumer's table and column metadata captured with each dump, and a verdict on
   drift between two snapshots.
 - Storage accounting: archive size and growth per project and class, with an expectation on growth.
