@@ -143,7 +143,7 @@ confirmed the same day in the review of the pull request that added the personal
 
 | Phase | Release | Status | Pull request |
 |---|---|---|---|
-| 0 — Development process | v0.1 | Merged | [#2](https://github.com/Deluha/Project_Ulduar/pull/2) |
+| 0 — Development process | v0.1 | Merged | |
 | 1 — Freya | v0.1 | Not started | |
 | 2 — Hodir | v0.1 | Not started | |
 | 3 — Mimiron | v0.1 | Not started | |
