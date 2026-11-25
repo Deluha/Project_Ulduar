@@ -21,6 +21,9 @@ roadmap phase.
 | **Thorim** | Run ledger | 4 |
 | **Algalon** | Monitoring: verdicts and alerts | 5 |
 
+The name is a homage. Project Ulduar is not affiliated with, endorsed by or sponsored by Blizzard
+Entertainment; Warcraft is a trademark of Blizzard Entertainment, Inc.
+
 ## Install
 
 For development (Python 3.11 or newer, Docker for the local test services):

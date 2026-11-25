@@ -50,12 +50,15 @@ Enforced: C4.
 
 - An archived object is written once under its content address and never overwritten; storing an
   identical object again is a no-op, and a different object never reuses a key.
-- An object is deleted only by a retention rule the consumer declared, and the deletion is itself
-  recorded in the Archivum before the object goes. No other code path deletes from the archive.
+- An object leaves the archive only by a recorded deletion: a retention rule the consumer declared, the
+  built-in rule for what an interrupted put left behind, or a purge (`ROADMAP.md` D38, D39). The record
+  is written to the Archivum before the object goes, the deletion runs under the retention credential,
+  and the credential that writes cannot delete (D35). No other code path deletes from the archive.
 - Recorded history — catalog entries, lineage edges, runs, measurements, verifications, verdicts — is
   append-only: a correction, a failure, a re-run and a retention action are new records. No code path
-  issues `UPDATE`, `DELETE` or `TRUNCATE` against a history table, and no migration of the Archivum
-  rewrites existing rows.
+  issues `UPDATE`, `DELETE` or `TRUNCATE` against a history table except the retention the consumer
+  declared and the recorded redaction, which the ledger role alone runs (D40); the recording roles cannot
+  (D30). No migration of the Archivum rewrites existing rows.
 
 Enforced: review until the stores exist; Phases 1 and 2 add tests that the Archivum and the storage
 interface refuse both.
@@ -94,6 +97,9 @@ Enforced: the docs-sync guard (commit-msg hook, verify, and CI where its check i
 - Behaviour that touches the database is tested against PostgreSQL 18, and behaviour that touches the
   archive against an S3-compatible server (and a real directory for the local backend) — never a mock,
   a stub client or another engine.
+- A third-party service with no local real server (Google Drive, the GitHub interface) is the one exception: it is
+  tested against a local simulated server built from recorded real responses and reached through a
+  fixture like any service (`ROADMAP.md` D42). The exception never covers the database or the archive.
 - Tests reach the services only through the fixtures of `tests/conftest.py`, or a conftest helper fed a
   fixture's guarded address (`rolled_back_connection(db_dsn)`); a test never opens its own connection or
   client and never names a connection string.
@@ -162,6 +168,9 @@ when a targeted change suffices, no touching unrelated code in a PR; surface nea
 - **Stores:** catch the driver's or client's specific exceptions, add context and **re-raise** — never
   swallow. A failed write leaves no catalog entry for an object that was not stored, and no stored
   object without its catalog entry being retried or reported. Re-wrap with `raise … from e`.
+  The one exception is a run's recording path: a failure to record is reported and never raised into the
+  consumer's job, while a command whose purpose is the archive or the verdict still fails with its own
+  exit code (`ROADMAP.md` D33).
 - **Integrity:** a checksum mismatch is never retried away or downgraded to a warning; it is recorded
   and raised.
 - **Inputs:** validate early (an unknown project, an empty path, a missing configuration key) and fail
