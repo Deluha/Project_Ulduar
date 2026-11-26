@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -43,6 +44,9 @@ from ulduar import _db, _ids
 from ulduar.config import ArchiveSettings, CredentialSettings, load_config
 from ulduar.config import Config as UlduarConfig
 from ulduar.freya import install, onboard_project, open_catalog
+from ulduar.hodir import Archive
+from ulduar.hodir import _layout as hodir_layout
+from ulduar.hodir._store import open_store
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # Marker → the fixtures that make a test need that service.
@@ -528,3 +532,77 @@ def archive_settings_dir(tmp_path: Path) -> ArchiveSettings:
     root = tmp_path / "archive"
     root.mkdir()
     return ArchiveSettings(backend="directory", path=root)
+
+
+# --- shared helpers of the Hodir tests (an archive session over each backend, one stored content, fault injection) ---
+
+# The backends a session test runs over; only the bucket case is marked `s3`. The storage-interface tests add a
+# versioned bucket and keep their own list.
+ARCHIVE_BACKENDS = [pytest.param("directory", id="directory"), pytest.param("s3", id="s3", marks=pytest.mark.s3)]
+ARCHIVE_SETTINGS_FIXTURES = {"directory": "archive_settings_dir", "s3": "archive_settings_s3"}
+CONTENT = b"the vault keeps this"
+CONTENT_CHECKSUM = hashlib.sha256(CONTENT).digest()
+
+
+class Fault(Exception):
+    """What `FaultyStore` raises: no store or driver error looks like it, so a test sees exactly its own failure."""
+
+
+class FaultyStore:
+    """A writing store that forwards every call to a real one and raises `Fault` after the *nth* call of *method*.
+
+    The call itself is made first, so the failure falls between two steps of a put, never inside one. With
+    *hide_head* the first that many `head` calls report the object as absent, as a deletion racing the put would.
+    """
+
+    def __init__(self, store: Any, method: str = "", nth: int = 1, hide_head: int = 0) -> None:
+        self._store = store
+        self._method = method
+        self._nth = nth
+        self._hide_head = hide_head
+        self.calls: dict[str, int] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._store, name)
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            self.calls[name] = self.calls.get(name, 0) + 1
+            result = target(*args, **kwargs)
+            if name == "head" and self.calls[name] <= self._hide_head:
+                return None
+            if name == self._method and self.calls[name] == self._nth:
+                raise Fault(f"after {name}")
+            return result
+
+        return call
+
+
+@pytest.fixture(params=ARCHIVE_BACKENDS)
+def config(request: pytest.FixtureRequest, archivum: Archivum, tmp_path: Path) -> UlduarConfig:
+    """An onboarded config (project `alpha`) with the archive of each backend in turn."""
+    settings: ArchiveSettings = request.getfixturevalue(ARCHIVE_SETTINGS_FIXTURES[request.param])
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    return replace(onboarded(archivum, tmp_path), archive=replace(settings, spool_dir=spool))
+
+
+@pytest.fixture
+def source(tmp_path: Path) -> Path:
+    """A file holding `CONTENT`."""
+    path = tmp_path / "source.bin"
+    path.write_bytes(CONTENT)
+    return path
+
+
+@contextmanager
+def faulty_archive(config: UlduarConfig, **fault: Any) -> Iterator[tuple[Archive, FaultyStore]]:
+    """An `Archive` over the real store wrapped in a `FaultyStore`, on its own catalog session."""
+    assert config.archive is not None
+    with open_catalog(config) as catalog:
+        store = FaultyStore(open_store(config.archive), **fault)
+        yield Archive(catalog, store, config.archive), store  # type: ignore[arg-type]
+
+
+def object_key(scope: str = "default") -> str:
+    """The key of the object `CONTENT` is stored under, for project `alpha`."""
+    return hodir_layout.object_key("alpha", scope, CONTENT_CHECKSUM)

@@ -16,9 +16,7 @@ import os
 import stat
 import threading
 import uuid
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,9 +26,21 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from tests.conftest import Archivum, count, failure, ms_ago, onboarded, recorder_of
+from tests.conftest import (
+    CONTENT,
+    CONTENT_CHECKSUM,
+    Archivum,
+    Fault,
+    count,
+    failure,
+    faulty_archive,
+    ms_ago,
+    object_key,
+    onboarded,
+    recorder_of,
+)
 from ulduar import _ids
-from ulduar.config import ArchiveSettings, Config
+from ulduar.config import Config
 from ulduar.errors import (
     ArchiveFormatError,
     ConfigurationError,
@@ -39,12 +49,10 @@ from ulduar.errors import (
     UnknownRecordError,
 )
 from ulduar.freya import Artifact, Connection, open_catalog
-from ulduar.hodir import Archive, PutSink, _archivum, _layout, archive, open_archive
+from ulduar.hodir import PutSink, _archivum, _layout, archive, open_archive
 from ulduar.hodir._layout import Manifest
 from ulduar.hodir._store import WritingStore, open_store
 
-BACKENDS = [pytest.param("directory", id="directory"), pytest.param("s3", id="s3", marks=pytest.mark.s3)]
-SETTINGS_FIXTURES = {"directory": "archive_settings_dir", "s3": "archive_settings_s3"}
 ARCHIVE_TABLES = (
     "archive_registration",
     "archive_retention_rule",
@@ -52,8 +60,6 @@ ARCHIVE_TABLES = (
     "archive_check",
     "archive_finding",
 )
-CONTENT = b"the vault keeps this"
-CHECKSUM = hashlib.sha256(CONTENT).digest()
 FOREIGN_MARKERS = [
     pytest.param(b'{"format":"something-else","version":1}\n', "foreign format marker", id="other format"),
     pytest.param(b"not json at all", "foreign format marker", id="unparseable"),
@@ -61,64 +67,6 @@ FOREIGN_MARKERS = [
         b'{"format":"ulduar-archive","version":2}\n', "format version 2; this library knows version 1", id="v2"
     ),
 ]
-
-
-class Fault(Exception):
-    """What `FaultyStore` raises: no store or driver error looks like it, so a test sees exactly its own failure."""
-
-
-class FaultyStore:
-    """A writing store that forwards every call to a real one and raises `Fault` after the *nth* call of *method*.
-
-    The call itself is made first, so the failure falls between two steps of a put, never inside one. With
-    *hide_head* the first that many `head` calls report the object as absent, as a deletion racing the put would.
-    """
-
-    def __init__(self, store: WritingStore, method: str = "", nth: int = 1, hide_head: int = 0) -> None:
-        self._store = store
-        self._method = method
-        self._nth = nth
-        self._hide_head = hide_head
-        self.calls: dict[str, int] = {}
-
-    def __getattr__(self, name: str) -> Any:
-        target = getattr(self._store, name)
-
-        def call(*args: Any, **kwargs: Any) -> Any:
-            self.calls[name] = self.calls.get(name, 0) + 1
-            result = target(*args, **kwargs)
-            if name == "head" and self.calls[name] <= self._hide_head:
-                return None
-            if name == self._method and self.calls[name] == self._nth:
-                raise Fault(f"after {name}")
-            return result
-
-        return call
-
-
-@pytest.fixture(params=BACKENDS)
-def config(request: pytest.FixtureRequest, archivum: Archivum, tmp_path: Path) -> Config:
-    """An onboarded config (project `alpha`) with the archive of each backend in turn."""
-    settings: ArchiveSettings = request.getfixturevalue(SETTINGS_FIXTURES[request.param])
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    return replace(onboarded(archivum, tmp_path), archive=replace(settings, spool_dir=spool))
-
-
-@pytest.fixture
-def source(tmp_path: Path) -> Path:
-    path = tmp_path / "source.bin"
-    path.write_bytes(CONTENT)
-    return path
-
-
-@contextmanager
-def faulty_archive(config: Config, **fault: Any) -> Iterator[tuple[Archive, FaultyStore]]:
-    """An `Archive` over the real store wrapped in a `FaultyStore`, on its own catalog session."""
-    assert config.archive is not None
-    with open_catalog(config) as catalog:
-        store = FaultyStore(open_store(config.archive), **fault)
-        yield Archive(catalog, store, config.archive), store  # type: ignore[arg-type]
 
 
 def spool_of(config: Config) -> Path:
@@ -140,10 +88,6 @@ def stored_bytes(config: Config, key: str) -> bytes:
         return bytes(stream.read())
 
 
-def object_key(scope: str = "default") -> str:
-    return _layout.object_key("alpha", scope, CHECKSUM)
-
-
 def registrations(archivum: Archivum) -> list[tuple[uuid.UUID, str | None]]:
     with archivum.superuser() as su:
         rows = su.execute("SELECT artifact_id, retention_class FROM ulduar.archive_registration ORDER BY 1").fetchall()
@@ -154,8 +98,8 @@ def registrations(archivum: Archivum) -> list[tuple[uuid.UUID, str | None]]:
 
 
 def test_the_keys_follow_the_layout() -> None:
-    digest = CHECKSUM.hex()
-    assert _layout.object_key("alpha", "raw", CHECKSUM) == f"alpha/raw/_objects/sha256/{digest[:2]}/{digest}"
+    digest = CONTENT_CHECKSUM.hex()
+    assert _layout.object_key("alpha", "raw", CONTENT_CHECKSUM) == f"alpha/raw/_objects/sha256/{digest[:2]}/{digest}"
     assert _layout.objects_prefix("alpha", "raw") == "alpha/raw/_objects/sha256"
     artifact_id = _ids.uuid7(int(datetime(2026, 3, 5, 23, 59, tzinfo=UTC).timestamp() * 1000))
     assert _layout.manifest_key("alpha", "raw", artifact_id) == f"alpha/raw/_manifests/2026/03/{artifact_id}.json"
@@ -168,9 +112,9 @@ def test_the_keys_follow_the_layout() -> None:
 def test_a_name_that_could_leave_its_prefix_is_refused_by_every_key_builder() -> None:
     for bad in ("..", "a/b", "_objects", "", "A"):
         with pytest.raises(ValueError):
-            _layout.object_key(bad, "raw", CHECKSUM)
+            _layout.object_key(bad, "raw", CONTENT_CHECKSUM)
         with pytest.raises(ValueError):
-            _layout.object_key("alpha", bad, CHECKSUM)
+            _layout.object_key("alpha", bad, CONTENT_CHECKSUM)
         with pytest.raises(ValueError):
             _layout.manifests_prefix("alpha", bad)
         with pytest.raises(ValueError):
@@ -180,9 +124,9 @@ def test_a_name_that_could_leave_its_prefix_is_refused_by_every_key_builder() ->
 
 
 def test_an_object_key_is_parsed_back_to_its_scope_and_checksum() -> None:
-    key = _layout.object_key("alpha", "raw", CHECKSUM)
-    assert _layout.parse_object_key(key.removeprefix("alpha/")) == ("raw", CHECKSUM)
-    digest = CHECKSUM.hex()
+    key = _layout.object_key("alpha", "raw", CONTENT_CHECKSUM)
+    assert _layout.parse_object_key(key.removeprefix("alpha/")) == ("raw", CONTENT_CHECKSUM)
+    digest = CONTENT_CHECKSUM.hex()
     for other in (
         "raw/_objects/sha256/00/" + digest,  # the head does not match the hash
         f"raw/_objects/sha256/{digest[:2]}/{digest[:-1]}",
@@ -202,7 +146,7 @@ def manifest(**changes: Any) -> Manifest:
         "project": "alpha",
         "scope": "raw",
         "kind": "report",
-        "checksum": CHECKSUM,
+        "checksum": CONTENT_CHECKSUM,
         "size": len(CONTENT),
         "dataset_id": _ids.uuid7(),
         "retention_class": "short",
@@ -218,7 +162,7 @@ def test_a_manifest_round_trips_and_is_canonical(changes: dict[str, Any]) -> Non
     assert data.endswith(b"\n") and b" " not in data
     raw = json.loads(data)
     assert list(raw) == sorted(raw) and raw["format"] == 1
-    assert raw["checksum"] == "sha256:" + CHECKSUM.hex()
+    assert raw["checksum"] == "sha256:" + CONTENT_CHECKSUM.hex()
     assert raw["event_at"].endswith("Z") and len(raw["event_at"]) == len("2026-01-01T00:00:00.000Z")
     assert set(raw) == {
         "format", "artifact_id", "event_at", "project", "scope", "kind", "checksum", "size", "dataset_id",
@@ -258,8 +202,8 @@ def mutated(**changes: Any) -> bytes:
         mutated(kind=""),
         mutated(kind=5),
         mutated(checksum="sha256:abc"),
-        mutated(checksum="md5:" + CHECKSUM.hex()),
-        mutated(checksum="sha256:" + CHECKSUM.hex().upper()),
+        mutated(checksum="md5:" + CONTENT_CHECKSUM.hex()),
+        mutated(checksum="sha256:" + CONTENT_CHECKSUM.hex().upper()),
         mutated(size=-1),
         mutated(size=1.5),
         mutated(size=True),
@@ -330,7 +274,7 @@ def test_a_file_is_stored_manifested_registered_and_returned(config: Config, arc
     assert (stored.artifact_id, stored.kind, stored.checksum, stored.size) == (
         record_id,
         "report",
-        CHECKSUM,
+        CONTENT_CHECKSUM,
         len(CONTENT),
     )
     assert (stored.scope, stored.origin, stored.dataset_id) == ("default", "a/path", dataset.dataset_id)
@@ -343,7 +287,7 @@ def test_a_file_is_stored_manifested_registered_and_returned(config: Config, arc
         "alpha",
         "default",
         "report",
-        CHECKSUM,
+        CONTENT_CHECKSUM,
         len(CONTENT),
         dataset.dataset_id,
         "short",
@@ -387,7 +331,9 @@ def test_the_same_record_id_twice_changes_nothing_and_returns_the_same_artifact(
     assert registrations(archivum) == [(record_id, "a")]
     messages = [r.getMessage() for r in caplog.records if r.name == "ulduar.hodir.archive"]
     assert len(messages) == 2 and "object stored" in messages[0] and "object already stored" in messages[1]
-    assert all(CHECKSUM.hex()[:12] in m and CHECKSUM.hex() not in m and "source.bin" not in m for m in messages)
+    assert all(
+        CONTENT_CHECKSUM.hex()[:12] in m and CONTENT_CHECKSUM.hex() not in m and "source.bin" not in m for m in messages
+    )
 
 
 def test_the_same_record_id_with_another_retention_class_is_refused_and_changes_nothing(
@@ -480,7 +426,7 @@ def test_a_committed_stream_is_stored_like_a_file_and_commit_is_repeatable(confi
             with pytest.raises(UlduarError, match="closed"):
                 sink.write(b"more")
         assert list(spool.iterdir()) == []
-    assert (stored.kind, stored.checksum, stored.size) == ("model", CHECKSUM, len(CONTENT))
+    assert (stored.kind, stored.checksum, stored.size) == ("model", CONTENT_CHECKSUM, len(CONTENT))
     assert stored_bytes(config, object_key()) == CONTENT
     assert registrations(archivum) == [(stored.artifact_id, "a")]
     with open_archive(config) as session:

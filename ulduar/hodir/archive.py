@@ -1,18 +1,22 @@
-"""The archive session: store a file or a stream as an immutable, content-addressed object and register it.
+"""The archive session: store a file or a stream as an immutable, content-addressed object and get it back.
 
 Input: a `Config` with an `[archive]` section and the recording role's Archivum connection. Output:
-`open_archive`, which yields an `Archive` holding the catalog session and the writing store, and the `Artifact`
-each put returns. Sits above Freya (the catalog, one connection per job) and the storage interface; the
-facade `ulduar.hodir` re-exports it.
+`open_archive`, which yields an `Archive` holding the catalog session and the writing store, the `Artifact`
+each put returns, and the verified bytes of a get. Sits above Freya (the catalog, one connection per job) and
+the storage interface; the facade `ulduar.hodir` re-exports it.
 
 A put writes in the order object, manifest, artifact, registration (D31): a failure leaves at worst an object
 without an entry, never an entry without its object, and running the same put again with the same `record_id`
 completes it. The registration is written under the object's address lock (H15), after a check that the object is
 there, so a deletion that races a put cannot remove an object a registration then names.
+
+A get is verified (D36): the object's bytes are hashed and counted while they are read, and a file is handed over
+only after they matched the artifact's checksum and size.
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -22,11 +26,11 @@ from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ulduar import _ids
 from ulduar.config import ArchiveSettings, Config, check_name
-from ulduar.errors import ConfigurationError, IntegrityError, UlduarError
+from ulduar.errors import ConfigurationError, IntegrityError, UlduarError, UnknownRecordError
 from ulduar.freya import Artifact, Catalog, Connection, Dataset, Project, open_catalog
 from ulduar.freya.catalog import check_kind, check_origin
 from ulduar.hodir import _archivum, _layout
@@ -234,6 +238,90 @@ class Archive:
         finally:
             with suppress(FileNotFoundError):
                 path.unlink()
+
+    def get(self, artifact: Artifact | UUID, destination: str | os.PathLike[str]) -> Path:
+        """Write the archived object of *artifact* (an `Artifact` or its id) to the new file *destination*; return it.
+
+        Only the artifact's id is used: the checksum, size and scope are re-read from the catalog.
+
+        The bytes are written to a partial file beside the destination (`.<name>.ulduar-partial-<hex>`, mode 0o666
+        under the umask), hashed while written, and the destination appears, by a hard link, only after they match
+        the artifact's checksum and size and were synced; a failure at any point removes the partial file. A
+        destination that exists (a dangling symbolic link included) is `FileExistsError`, and one whose parent is
+        not a directory `FileNotFoundError` or `NotADirectoryError`, both before any read of the store.
+        `UnknownRecordError` when the artifact is not recorded or its object is no longer in the archive;
+        `IntegrityError` when the object is missing, unreadable or does not match.
+        """
+        artifact = self._archived(artifact)
+        dest = Path(destination)
+        try:
+            os.lstat(dest)
+        except FileNotFoundError:
+            pass
+        else:
+            raise FileExistsError(errno.EEXIST, "The destination already exists", str(dest))
+        directory = os.open(dest.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            partial = f".{dest.name}.ulduar-partial-{uuid4().hex}"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            file = os.fdopen(os.open(partial, flags, 0o666, dir_fd=directory), "wb")
+            try:
+                with file:
+                    self._read_verified(artifact, file.write)
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.link(partial, dest.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                os.unlink(partial, dir_fd=directory)
+            except BaseException:
+                with suppress(OSError):
+                    os.unlink(partial, dir_fd=directory)
+                raise
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return dest
+
+    def get_stream(self, artifact: Artifact | UUID, out: BinaryIO) -> int:
+        """Write the archived object of *artifact* to *out* as it is read; return the number of bytes written.
+
+        The bytes reach *out* before they are verified: when this raises `IntegrityError` (a checksum or size
+        mismatch, found at the end), the caller must discard what it received. Other errors as `get`.
+        """
+        return self._read_verified(self._archived(artifact), out.write)
+
+    def _archived(self, artifact: Artifact | UUID) -> Artifact:
+        """The artifact as the catalog recorded it, once it is known to be in the archive.
+
+        Only the id of *artifact* is used: its checksum, size and scope are the recorded ones, never the
+        caller's. `UnknownRecordError` when the id is not recorded or the object is not in the archive.
+        """
+        artifact_id = artifact if isinstance(artifact, UUID) else artifact.artifact_id
+        recorded = self._catalog.get_artifact(artifact_id)
+        project_id = self.project.project_id
+        if not self._catalog.transaction(
+            f"Checking that artifact {artifact_id} is archived",
+            lambda tx: _archivum.is_archived(tx, project_id, artifact_id),
+        ):
+            raise UnknownRecordError(f"Artifact {artifact_id} is not in the archive")
+        return recorded
+
+    def _read_verified(self, artifact: Artifact, write: Callable[[bytes], object]) -> int:
+        """Pass the object's bytes to *write* chunk by chunk, hashing and counting them; verify at the end."""
+        key = _layout.object_key(self.project.name, artifact.scope, artifact.checksum)
+        digest = hashlib.sha256()
+        size = 0
+        with self._store.read(key) as stream:
+            while chunk := stream.read(CHUNK_SIZE):
+                digest.update(chunk)
+                size += len(chunk)
+                write(chunk)
+        if size != artifact.size:
+            raise IntegrityError(f"Object {key} does not match its recorded size")
+        if digest.digest() != artifact.checksum:
+            raise IntegrityError(f"Object {key} does not match its recorded checksum")
+        short = artifact.checksum.hex()[:_SHORT_CHECKSUM_HEX]
+        logger.info("got artifact %s: %s, %d bytes", artifact.artifact_id, short, size)
+        return size
 
     def _put(self, request: _Request, path: Path, size: int, sha256: bytes) -> Artifact:
         """Store *path* (*size* bytes hashing to *sha256*) and register it: object, manifest, artifact, registration."""

@@ -1,8 +1,9 @@
-"""Hodir's SQL against the Archivum, in one place: the address lock and the registration insert.
+"""Hodir's SQL against the Archivum, in one place: the address lock, the registration insert and the archived check.
 
-Input: a transaction of the catalog session (`Catalog.transaction`) and the ids and checksums of one put. Output:
-the registration row of an archived artifact. Private: Hodir's modules import it, a consumer never does. Every
-statement composes identifiers through Freya's `qualified` and binds values as parameters (hard rule 3).
+Input: a transaction of the catalog session (`Catalog.transaction`) and the ids and checksums of one put or get.
+Output: the registration row of an archived artifact, and whether an artifact's object is still archived. Private:
+Hodir's modules import it, a consumer never does. Every statement composes identifiers through Freya's `qualified`
+and binds values as parameters (hard rule 3).
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ _SELECT_CLASS = sql.SQL("SELECT retention_class FROM {} WHERE project_id = %s AN
 )
 
 
+_IS_ARCHIVED = sql.SQL("SELECT {}(%s, %s)").format(qualified("artifact_is_archived"))
+
+
 def address_lock_name(project_id: UUID, scope: str, checksum: bytes) -> str:
     """The name of the advisory lock that orders a put and a deletion of one object (project, scope, content)."""
     return f"ulduar.archive:{project_id}:{scope}:{checksum.hex()}"
@@ -35,6 +39,12 @@ def lock_address(tx: Connection, project_id: UUID, scope: str, checksum: bytes) 
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (address_lock_name(project_id, scope, checksum),)
     )
+
+
+def is_archived(tx: Connection, project_id: UUID, artifact_id: UUID) -> bool:
+    """True while the artifact is registered and no confirmed deletion of its content was recorded after that."""
+    row = tx.execute(_IS_ARCHIVED, (project_id, artifact_id)).fetchone()
+    return row is not None and bool(row[0])
 
 
 def insert_registration(

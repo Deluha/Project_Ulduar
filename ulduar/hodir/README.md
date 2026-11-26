@@ -4,17 +4,17 @@
 
 Hodir is the cold archive: immutable, content-addressed storage of files, database dumps, reports and models
 (hard rule 5). The package holds the storage interface and its two backends (a bucket on an S3-compatible server and
-a local directory), the object layout, and the writing half of the public surface: `open_archive` with `put_file`
-and `put_stream`. The reading, verifying and retention calls arrive in later Phase 2 commits.
+a local directory), the object layout, and the public surface so far: `open_archive` with `put_file`, `put_stream`,
+`get` and `get_stream`. The verifying and retention calls arrive in later Phase 2 commits.
 
 ## Files & entry points
 
 | File | Holds |
 |---|---|
 | `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink` |
-| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`) and `PutSink` |
+| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`, `get`, `get_stream`) and `PutSink` |
 | `_layout.py` | Private: the one home of the object layout: the keys, the format marker, the layout text, the `Manifest` |
-| `_archivum.py` | Private: Hodir's SQL, the address lock and the registration insert |
+| `_archivum.py` | Private: Hodir's SQL, the address lock, the registration insert and the archived check |
 | `_store.py` | Private: the `WritingStore` and `DeletingStore` protocols, `StoredObject`, `UnfinishedUpload`, `open_store`, `check_key` (the one key validator), `check_size`, `part_size`, `open_regular` and the size constants |
 | `_directory.py` | Private: `DirectoryStore` and `DirectoryDeletingStore` |
 | `_s3.py` | Private: `S3Store` and `S3DeletingStore` on a boto3 client, the transport guard `check_endpoint`, the error translation |
@@ -74,6 +74,31 @@ type or another `format` is an `ArchiveFormatError` that names the problem and n
 - Each put logs one `info` line (`ulduar.hodir.archive`): the first 12 hex digits of the checksum, the size, the
   scope and whether the object was new or already stored; no origin, no name.
 
+### Getting
+
+- `get(artifact, destination) -> Path` and `get_stream(artifact, out) -> int` take an `Artifact` or its id. Only
+  the id is used: the artifact is always re-read from the catalog (`UnknownRecordError` when it is not recorded) and
+  its recorded checksum, size and scope apply, never those of the object the caller holds. The artifact must be in the archive:
+  registered, and with no confirmed deletion of its content recorded after the registration
+  (`ulduar.artifact_is_archived`, called by `_archivum.is_archived` in a catalog transaction); otherwise
+  `UnknownRecordError("Artifact <id> is not in the archive")`, before any read of the store.
+- The object is read from the store in 1 MiB chunks and hashed (SHA-256) and counted as it goes (one helper serves
+  both calls); at the end its size and checksum must equal the artifact's, else `IntegrityError` (`Object <key> does
+  not match its recorded size` or `... recorded checksum`). A mismatch is never retried or downgraded. An object
+  missing from the store is the store's `IntegrityError`.
+- `get` refuses a destination that exists (`FileExistsError`; a dangling symbolic link counts) and one whose parent
+  is not an existing directory (`FileNotFoundError`, or `NotADirectoryError` when the parent is a file), both before
+  any read. It writes to a partial file in the destination's own directory, `.<name>.ulduar-partial-<hex>`, created
+  exclusively without following links (mode 0o666 under the umask), through one directory descriptor; after the
+  verification it syncs the file, hard-links it to the destination name (an existing name is never replaced: a
+  destination that appeared meanwhile is `FileExistsError`), removes the partial file and syncs the directory.
+  A failure after the partial file was made removes it, best effort, and re-raises; a destination is therefore
+  either absent or a verified, complete copy.
+- `get_stream` writes each chunk to *out* as it is read, so on a mismatch `IntegrityError` is raised after the
+  bytes were written: the caller must discard what it received. It returns the byte count.
+- Each get logs one `info` line (`ulduar.hodir.archive`): the artifact id, the first 12 hex digits of the checksum
+  and the size; never the destination, which may name a consumer's folder.
+
 ### The storage interface
 
 - `open_store(settings, *, deleting=False)` chooses the backend from `[archive]` (`ulduar/README.md`) and returns a
@@ -127,16 +152,18 @@ type or another `format` is an `ArchiveFormatError` that names the problem and n
 ## Interfaces & contracts
 
 - Public: `open_archive(config)` (a context manager yielding `Archive`), `Archive.project`, `Archive.scope`,
-  `Archive.put_file(...)`, `Archive.put_stream(...)` and `PutSink` (`write`, `commit`), as described above.
+  `Archive.put_file(...)`, `Archive.put_stream(...)`, `PutSink` (`write`, `commit`), `Archive.get(...)` and
+  `Archive.get_stream(...)`, as described above.
   `Archive(catalog, store, settings)` is constructible directly (a test injects a wrapped store).
 - Private: `open_store`, `WritingStore`, `DeletingStore`, `StoredObject(key, size, modified, immediate)`,
   `UnfinishedUpload(key, upload_id, started)`, `check_key`, the `_layout` functions and `Manifest`.
-- Exceptions (`ulduar.errors`): `ArchiveUnavailable`, `IntegrityError`, `ArchiveFormatError` (a foreign marker or
-  version, a manifest that is not format 1), `UnknownRecordError` (a scope the project lacks), `UlduarError`
+- Exceptions (`ulduar.errors`): `ArchiveUnavailable`, `IntegrityError` (also a get of a missing or mismatching
+  object), `ArchiveFormatError` (a foreign marker or version, a manifest that is not format 1), `UnknownRecordError`
+  (a scope the project lacks; a get of an artifact that is not recorded or not in the archive), `UlduarError`
   (another manifest or retention class under a `record_id`, a stream past the spool limit), `ConfigurationError`
   for no `[archive]`, an unset variable a setting names, a missing directory, a refused endpoint, a missing
   `deleter` or a missing extra.
-- Library log lines (loggers `ulduar.hodir.*`): `info` per put (`archive`), `debug` per stored object and deletion,
+- Library log lines (loggers `ulduar.hodir.*`): `info` per put and per get (`archive`), `debug` per stored object and deletion,
   `warning` for a skipped link or a failed abort; none carries a credential or an address.
 
 ## Extending
@@ -147,4 +174,4 @@ to a writing class (hard rule 5); the object layout and checksum definition are 
 
 ## See also
 
-`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py`
+`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py` · `../../tests/test_hodir_get.py`
