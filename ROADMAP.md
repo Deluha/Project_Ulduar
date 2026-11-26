@@ -469,7 +469,7 @@ owner's call). Hodir has no client-side encryption (D34).
 Sign-off decisions (owner, 2026-11-26: H1–H22 confirmed as proposed, after a probe of the pinned object store
 showed that conditional `PutObject` and `CompleteMultipartUpload` are honoured, that a SHA-256 checksum header is
 enforced, that `CopyObject` ignores `If-None-Match` and overwrites, and that a bucket-policy condition on
-`s3:if-none-match` is refused; H23–H27 confirmed the same day):
+`s3:if-none-match` is refused; H23–H28 confirmed the same day):
 
 | # | Item | Decision |
 |---|---|---|
@@ -495,6 +495,7 @@ enforced, that `CopyObject` ignores `If-None-Match` and overwrites, and that a b
 | H22 | Tests | The pinned MinIO stays; a second server stays Later. The test services provision a writer user without delete and a deleter user. A wrapper in `tests/` that passes every call to the real backend and raises at a chosen step is allowed under hard rule 9. Put against put and put against deletion run on two connections. |
 | H23 | Freya's component hook | `Catalog.transaction(what)` (public): one transaction on the session's connection with the time limits, error translation and partition retry; Hodir registers the artifact through `register_artifact`, then writes its registration under the address lock in it. Thorim and Algalon reuse it (F26 holds: one connection per job). |
 | H24–H27 | Phase 1 knock-ons | `freya.redact` takes an optional `record_id`; an artifact whose object is still archived does not age out of history; step 2 replaces `ensure_partitions` and `drop_empty_partitions` to cover the two new partitioned tables, and both join `HISTORIES`; the dev container provisions the same writer and deleter users. |
+| H28 | Rebuild in two steps | `Archive.rebuild` (recording role) re-registers artifacts from manifests and restores deletion records, and lists the redaction and history-retention records of the store; `freya.reapply_removals(config, records)` (ledger role) applies those the Archivum lacks under their original ids — one connection at a time. |
 
 ### Phase 3 — Mimiron
 
