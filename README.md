@@ -5,8 +5,8 @@ give a data project an immutable archive of what went in and what came out, a ca
 and where it came from, a record of every run, and a verdict on whether the data is fresh, complete
 and recoverable.
 
-**Status: in development, nothing released.** Phase 0 (the development process) is in place; the first
-component arrives in Phase 1. `ROADMAP.md` holds the plan and its status.
+**Status: in development, nothing released.** Phase 0 (the development process) is in place; Freya (catalog
+and lineage) is built and the next phases follow. `ROADMAP.md` holds the plan and its status.
 
 ## Components
 
@@ -25,6 +25,15 @@ The name is a homage. Project Ulduar is not affiliated with, endorsed by or spon
 Entertainment; Warcraft is a trademark of Blizzard Entertainment, Inc.
 
 ## Install
+
+For a consumer:
+
+```bash
+pip install "project-ulduar[binary]"
+```
+
+The `binary` extra bundles libpq; without it psycopg needs a system libpq 16 or newer. The configuration
+file is described in `ulduar/README.md`, installing the Archivum in `ulduar/freya/README.md`.
 
 For development (Python 3.11 or newer, Docker for the local test services):
 
@@ -56,6 +65,11 @@ skill under `.claude/skills/` routes each task to its one authoritative file. `C
 setup, the QA gates and the PR flow.
 
 ## Release & versioning
+
+Semantic versioning. During 0.x a minor release may break, with an upgrade note in `RELEASE_NOTES.md`; a
+deprecated name warns (`DeprecationWarning`) for at least one minor release before it is removed. Schema
+compatibility: an additive step keeps older libraries working, a breaking step raises the schema's minimum
+library version (`ulduar/freya/README.md`).
 
 The version is stated once, in `pyproject.toml`. `RELEASE_NOTES.md` records what shipped; `ROADMAP.md`
 records what is planned and leaves a release's section when that release is tagged.

@@ -10,8 +10,15 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 
 | File | Covers | Services |
 |---|---|---|
-| `conftest.py` | The database fixtures `db_dsn` and `db_conn`, the object-store fixtures `s3_settings`, `s3_client` and `s3_bucket`, the local-only guards, the `db` and `s3` markers, the required-run check | — |
+| `conftest.py` | The database fixtures `db_dsn`, `db_conn` and `archivum`, the object-store fixtures `s3_settings`, `s3_client` and `s3_bucket`, the local-only guards, the `db` and `s3` markers, the required-run check; the helpers the Freya tests share: `CHECKSUM`, `digest`, `ms_ago`, `onboarded`, `recorder_of`, `partition_exists`, `failure`, `count`, `old_artifacts`, `PARTITION_LOCK_KEY` and `lineage_lock_name` (the advisory locks of step 1), and `wait_until_blocked` (returns once sessions queue for a lock, so a race test acts deterministically) | — |
 | `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1 and recreated on another image; the S3 client ignoring proxies; CI starting them through `dev_tools/services.py`; the dev container naming the same images and credentials; the `services.py` command line; the fixtures' guards | both |
+| `test_config.py` | `ulduar.config`: defaults, every unknown-key level, the version key, names, bounds, file errors | no |
+| `test_ids.py` | `ulduar._ids`: UUIDv7 bits, the millisecond round trip, ordering, the server's reading of the same id | db |
+| `test_db.py` | `ulduar._db`: the transport guard (and the environment libpq falls back to), the DSN variable, error wrapping, the opened connection (pinned to READ COMMITTED), the statement, lock and budget limits, error translation by SQLSTATE | db |
+| `test_freya_ledger.py` | The schema ledger: every step applied to an empty database, no step applied twice, checksums, breaking steps, minimum library, concurrent installs, the ledger lock, step headers; what step 1 builds (roles, isolation, append-only, partitions: concurrent callers, the time window, UTC bounds under another session time zone, truncate refused on partitions) | db |
+| `test_freya_catalog.py` | The catalog session: opening and its refusals, the facade surface, dataset and artifact registration and lookup, idempotent retries, the partition created for an old month (two recorders at once, an edge recorder waiting meanwhile without deadlock, outside the window), every bad argument, isolation between two projects, append-only through the recording and the ledger role, `recorded_at` stamped by the database, a dataset only in its artifact's scope | db |
+| `test_freya_history.py` | The ledger-role calls: onboarding (idempotent, one role one project), retention rules (dry run, apply, latest wins, dropped partitions, other projects untouched; no deadlock with a recorder holding locks, an edge recorder waiting for its project lock or, for the dry run, a recorder making a partition; a rule declared meanwhile honoured; among declares serialised by the retention lock the one that commits last wins), redaction, the records that can never be removed, a maintenance mode passing only its own operation, the missing ledger variable | db |
+| `test_freya_lineage.py` | Lineage: edges between artifacts and datasets, the run reference, a missing partition created for an edge, cycles and unknown nodes refused with nothing kept, self-edge and empty parents, isolation between projects, idempotent edges by `record_ids`, opposite edges in flight together (also under a repeatable-read role default), an edge outside READ COMMITTED refused, ancestors and descendants on a diamond (each node once at its minimum depth), `max_depth`, a walk over a cycle | db |
 | `test_check_conventions.py` | Convention rules C1–C9 on synthetic input, then the real repository | no |
 | `test_check_docs_sync.py` | The docs-sync classifier, token rules, git parsing | no |
 | `test_check_guidance_integrity.py` | Each guidance check on a miniature tree, then the real repository | no |
@@ -23,6 +30,11 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 - `db_conn` yields a connection to the test database and rolls its uncommitted work back when the test
   ends. Work a test commits is not undone: a test of committing code creates and drops its own schema
   until a later phase adds a fixture for that.
+- `archivum` builds a throwaway Archivum for one test: a database `ulduar_test_<hex>` owned by a LOGIN role
+  `ulduar_test_ledger_<hex>` with `CREATEROLE` (it is granted `ulduar_recorder` with admin option when that group
+  already exists), and drops the database (`WITH (FORCE)`) and every role it made afterwards. Its DSNs are
+  exported to environment variables through `monkeypatch`, so the library under test reads them as a
+  consumer would. The group role `ulduar_recorder` itself is cluster-wide and stays.
 - `s3_bucket` creates a bucket with a fresh `ulduar-test-` name and removes it, with its objects, when
   the test ends. `s3_client` reads its endpoint and keys from the settings only, never from an AWS
   profile or environment variable.
@@ -54,13 +66,19 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
   helper `rolled_back_connection`, fed the guarded `db_dsn`. The two tests whose subject is a
   connection string may spell one: `test_services.py` (the guards) and `test_check_conventions.py`
   (the checker).
+- `archivum.config(tmp_path, project=..., recorder=..., **timeouts)` writes an `ulduar.toml` naming the ledger
+  and a recording role's variables and returns the loaded `Config`; `archivum.new_recorder()` makes a recording
+  login role that belongs to no project until onboarded (a test may `GRANT ulduar_recorder` to it as
+  superuser); `archivum.superuser()` yields an autocommit superuser connection to the throwaway database for
+  a test that must tamper with or inspect it.
 - With `ULDUAR_REQUIRE_SERVICES=1` exported, a targeted run that does not select a test of each service
   exits 1 by design.
 - A changed behaviour means updating its test deliberately in the same PR, never loosening an assertion.
 
 ## Extending
 
-Write a database test by taking `db_conn`, an object-store test by taking `s3_bucket` and `s3_client`.
+Write a database test by taking `db_conn` (work that is rolled back) or `archivum` (a test that commits, installs
+the schema or needs roles), an object-store test by taking `s3_bucket` and `s3_client`.
 Create what the test needs inside the test; the rollback and the bucket removal clean up. Add the file
 to the table above.
 

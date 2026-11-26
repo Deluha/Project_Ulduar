@@ -26,7 +26,11 @@ library only, so each script runs on a bare Python. Not part of the distribution
 - `services.py` holds the images, ports, throwaway credentials and the names of the variables the tests
   read, in one place. `start` is idempotent, recreates a container that runs another image than the one
   stated here, and waits until each service answers: PostgreSQL over TCP (`pg_isready`), MinIO on its
-  readiness endpoint. `env` prints the settings as `KEY=VALUE` lines.
+  readiness endpoint. `env` prints the settings as `KEY=VALUE` lines. Each image is named by tag and
+  digest (`name:tag@sha256:…`), which `docker inspect` reports back unchanged, so the "runs the image stated
+  here" check compares the whole reference; a new image release is a deliberate edit of the digest here and
+  in `.devcontainer/docker-compose.yml` (`tests/test_services.py` checks they agree). Read a digest with
+  `docker image inspect <image> --format '{{index .RepoDigests 0}}'`.
 
 ## Interfaces & contracts
 

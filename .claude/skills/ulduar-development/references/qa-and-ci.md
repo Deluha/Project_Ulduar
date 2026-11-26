@@ -74,7 +74,7 @@ stated once, in `dev_tools/services.py`.
 
 ## workflows
 
-Three GitHub Actions workflows in `.github/workflows/`. Third-party actions are pinned by commit SHA;
+Four GitHub Actions workflows in `.github/workflows/`. Third-party actions are pinned by commit SHA;
 every checkout sets `persist-credentials: false`; a run is cancelled by a newer push only on a pull
 request, never on `main`. Header comments in each file are the detailed contract.
 
@@ -82,7 +82,11 @@ request, never on `main`. Header comments in each file are the detailed contract
 |---|---|---|
 | `ci-pre-commit.yml` | PR, push to `main` | `pre-commit run --all-files` (dev extra installed; skips the commit-msg `docs-sync` and pre-push `pytest-fast` hooks and the staged-only `gitleaks` hook); then the pinned, sha256-verified gitleaks scan of the PR's commits and the tree (`references/checkers.md#checker-secret-scan`) |
 | `ci-docs-sync.yml` | PR | `check_docs_sync.py --base origin/<PR base> --actor <PR author>` (full history for the per-commit `[skip-docs]` attribution; the actor drives the Dependabot exemption) |
-| `ci-tests.yml` | PR, push to `main` | `pytest -q` with coverage against the local test services, started by `python dev_tools/services.py start` with their settings from `services.py env`, the services required; gating `mypy`; gating `actionlint` (version pinned in `pyproject.toml`); `CI gate` (`needs` all three, `if: always()`, passes only when every need succeeded) stands for the whole workflow in branch protection |
+| `ci-tests.yml` | PR, push to `main` | `pytest -q` with branch coverage against the local test services, started by `python dev_tools/services.py start` with their settings from `services.py env`, the services required, on a matrix of Python 3.11 to 3.15 (coverage artifact per version); the 90 % floor on `ulduar/` (`coverage report --include='ulduar/*' --fail-under=90`) is enforced on the 3.11 leg only; gating `mypy`; gating `actionlint` (version pinned in `pyproject.toml`); gating `package` ("Build and import the wheel": builds the wheel, installs it in a fresh venv outside the checkout and checks the import, `py.typed`, the SQL steps and the `License-Expression` metadata); `CI gate` (`needs` all four, `if: always()`, passes only when every need succeeded) stands for the whole workflow in branch protection |
+| `ci-scan.yml` | weekly (Monday 05:17 UTC), manual | `pip-audit` (pinned exactly in the `dev` extra, installed from the hashed lock) over `requirements/dev.lock`; CodeQL for Python (`github/codeql-action` pinned by SHA; the one job with `security-events: write` and `actions: read`). Not in the `CI gate`, not a required check |
+
+Jobs that install the dev tools (`ci-tests.yml`, `ci-pre-commit.yml`) run
+`pip install --require-hashes -r requirements/dev.lock`, then `pip install --no-deps -e .`.
 
 **Required checks.** Branch protection on `main` requires three checks, one per workflow: `CI gate`,
 `Run pre-commit hooks` and `Docs in sync with code`. `CI gate` covers only the jobs of `ci-tests.yml`; a
@@ -106,5 +110,17 @@ No workflow holds a secret, and none connects to anything but its own local test
 arrive in the same PR as their first import. The `dev` extra carries the tooling (pytest, ruff, mypy,
 pre-commit, actionlint) and the test suite's clients (a PostgreSQL driver and an S3 client); they are not
 a runtime choice, which each component's phase makes at its sign-off. Pin minimally; pin exactly only where
-a new release must arrive as a reviewed bump (actionlint, the gitleaks version in the workflow, the
-object-store image).
+a new release must arrive as a reviewed bump (actionlint, the gitleaks version in the workflow, pip-audit in
+the `dev` extra; the test-service images are pinned by digest in `dev_tools/services.py`).
+
+**The dev lock.** `requirements/dev.lock` is the hashed, fully pinned resolution of the `dev` extra; CI installs
+it with `--require-hashes`, and the weekly `pip-audit` reads it. It is compiled once, on the oldest supported
+Python, and installs on every supported one. Regenerate it after any change to the `dev` extra (pip-tools is
+in the extra), commit it with the change, and keep the command exactly:
+
+```
+pip-compile --extra dev --generate-hashes --allow-unsafe --strip-extras -o requirements/dev.lock pyproject.toml
+```
+
+Dependabot does not maintain it (the lock is compiled from `pyproject.toml`, not a `requirements.in`): a bump
+of a pin there is followed by a regeneration in the same PR.

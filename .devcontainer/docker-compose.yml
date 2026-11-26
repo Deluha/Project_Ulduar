@@ -1,16 +1,16 @@
-# Dev container services. The image tags must equal the ones in dev_tools/services.py
+# Dev container services. The images (tag and digest) must equal the ones in dev_tools/services.py
 # (tests/test_services.py checks it). The credentials are throwaways for local
 # instances that hold no data. `app` and `s3` share the `db` network namespace, so
 # PostgreSQL is on 127.0.0.1:5432, MinIO on 127.0.0.1:9000, and the fixtures'
 # local-host guards hold.
 services:
   db:
-    image: postgres:18
+    image: postgres:18@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ulduar
   s3:
-    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
     restart: unless-stopped
     command: server /data
     network_mode: service:db
