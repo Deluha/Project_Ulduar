@@ -9,10 +9,18 @@ name: ci-tests
 # `python dev_tools/services.py env`. ULDUAR_REQUIRE_SERVICES=1 turns a service
 # test that cannot connect into a failure instead of a skip, and fails a run in
 # which no database or no object-store test passed (hard rule 9). The pytest job
-# also records coverage (coverage.xml, a 14-day artifact). Two more gating jobs
-# ride along: mypy (strict; config in pyproject.toml) and actionlint over
-# .github/workflows. The final `gate` job (check name "CI gate") depends on all
-# three and stands for this workflow in branch protection, next to the checks of
+# runs on every supported Python (3.11 to 3.15; a matrix, one runner per version)
+# and records branch coverage (coverage.xml, a 14-day artifact named per version).
+# The coverage floor, 90 % of the branches and lines of ulduar/, is enforced on
+# the oldest leg (3.11) only: the figure does not differ between versions and one
+# leg is enough to hold it. The dev tools install from the hashed lock
+# requirements/dev.lock (`pip install --require-hashes`), the project itself
+# without its dependencies. Three more gating jobs ride along: mypy (strict;
+# config in pyproject.toml), actionlint over .github/workflows, and `package`,
+# which builds the wheel and imports it from a fresh virtualenv outside the
+# checkout (what a consumer gets: the typing marker, the SQL steps, the licence
+# metadata). The final `gate` job (check name "CI gate") depends on all four and
+# stands for this workflow in branch protection, next to the checks of
 # ci-pre-commit and ci-docs-sync.
 on:
   pull_request:
@@ -28,9 +36,13 @@ concurrency:
 
 jobs:
   pytest:
-    name: Run tests (PostgreSQL 18, MinIO)
+    name: Run tests (PostgreSQL 18, MinIO, Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     env:
       ULDUAR_REQUIRE_SERVICES: "1"
     steps:
@@ -39,22 +51,27 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: requirements/dev.lock
       - name: Start the local test services
         run: |
           python dev_tools/services.py start
           python dev_tools/services.py env >> "$GITHUB_ENV"
-      - name: Install the project with the dev extra
-        run: pip install -e ".[dev]"
+      - name: Install the dev tools from the hashed lock, then the project
+        run: |
+          pip install --require-hashes -r requirements/dev.lock
+          pip install --no-deps -e .
       - name: Run pytest with coverage
-        run: python -m pytest -q -rs --cov=ulduar --cov=dev_tools --cov-report=xml --cov-report=term-missing:skip-covered
+        run: python -m pytest -q -rs --cov=ulduar --cov=dev_tools --cov-branch --cov-report=xml --cov-report=term-missing:skip-covered
+      - name: Hold the coverage floor on ulduar/
+        if: matrix.python-version == '3.11'
+        run: python -m coverage report --include='ulduar/*' --fail-under=90
       - name: Keep the coverage report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: coverage-${{ github.run_id }}
+          name: coverage-${{ github.run_id }}-py${{ matrix.python-version }}
           path: coverage.xml
           if-no-files-found: ignore
           retention-days: 14
@@ -71,9 +88,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install the project with the dev extra
-        run: pip install -e ".[dev]"
+          cache-dependency-path: requirements/dev.lock
+      - name: Install the dev tools from the hashed lock, then the project
+        run: |
+          pip install --require-hashes -r requirements/dev.lock
+          pip install --no-deps -e .
       - name: Run mypy
         run: python -m mypy
 
@@ -97,11 +116,49 @@ jobs:
           SHELLCHECK_OPTS: --severity=warning
         run: actionlint .github/workflows/*.yml
 
+  package:
+    name: Build and import the wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Build the wheel
+        run: python -m pip wheel --no-deps -w dist .
+      # A fresh virtualenv and a working directory outside the checkout, so the
+      # import can only succeed from what the wheel carries.
+      - name: Install the wheel in a fresh virtualenv
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-env"
+          "$RUNNER_TEMP/wheel-env/bin/pip" install dist/*.whl
+      - name: Check the installed package
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$RUNNER_TEMP/wheel-env/bin/python" - <<'PY'
+          import importlib.metadata
+          import importlib.resources
+
+          import ulduar
+          import ulduar.freya
+
+          package = importlib.resources.files("ulduar")
+          assert package.joinpath("py.typed").is_file(), "py.typed is missing from the wheel"
+          steps = importlib.resources.files("ulduar.freya").joinpath("steps")
+          assert any(item.name.endswith(".sql") for item in steps.iterdir()), "no .sql step in the wheel"
+          expression = importlib.metadata.metadata("project-ulduar")["License-Expression"]
+          assert expression == "MIT", f"License-Expression is {expression!r}"
+          print(f"ok: {ulduar.__file__}")
+          PY
+
   # One check to require for this workflow: it covers the gating jobs above, so
   # adding or renaming one of them never touches the repository's required-check list.
   gate:
     name: CI gate
-    needs: [pytest, mypy, actionlint]
+    needs: [pytest, mypy, actionlint, package]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -112,9 +169,10 @@ jobs:
           RESULT_PYTEST: ${{ needs.pytest.result }}
           RESULT_MYPY: ${{ needs.mypy.result }}
           RESULT_ACTIONLINT: ${{ needs.actionlint.result }}
+          RESULT_PACKAGE: ${{ needs.package.result }}
         run: |
           status=0
-          for pair in "pytest=$RESULT_PYTEST" "mypy=$RESULT_MYPY" "actionlint=$RESULT_ACTIONLINT"; do
+          for pair in "pytest=$RESULT_PYTEST" "mypy=$RESULT_MYPY" "actionlint=$RESULT_ACTIONLINT" "package=$RESULT_PACKAGE"; do
             echo "${pair%%=*}: ${pair#*=}"
             case "${pair#*=}" in
               success) ;;

@@ -3,7 +3,7 @@
 # The version here is the single product version; the package reads it at import.
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,7 +12,8 @@ version = "0.1.0.dev0"
 description = "A vault and observatory for data projects: catalog and lineage, cold archive, run ledger, monitoring"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 # Runtime dependencies are an ask-first decision (CLAUDE.md "Ask first"); each is signed off in ROADMAP.md.
 # psycopg needs a system libpq 16 or newer; the `binary` extra brings a bundled one (Phase 1, F32).
 dependencies = ["psycopg>=3.2,<4"]
@@ -32,6 +33,8 @@ dev = [
     # Pinned exactly: the gating actionlint job installs this line; a new release's
     # rules must arrive as a Dependabot PR, not red CI on every PR.
     "actionlint-py==1.7.12.25",
+    # Compiles requirements/dev.lock (the hashed lock of this extra).
+    "pip-tools>=7.4",
 ]
 
 [tool.setuptools.packages.find]

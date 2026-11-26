@@ -25,7 +25,8 @@ HOST = "127.0.0.1"
 START_TIMEOUT_SECONDS = 90
 
 POSTGRES_MAJOR = 18
-POSTGRES_IMAGE = f"postgres:{POSTGRES_MAJOR}"
+# Images are named by tag and digest: the tag says what it is, the digest makes the pull exact.
+POSTGRES_IMAGE = f"postgres:{POSTGRES_MAJOR}@sha256:c699303802144847d238196173655dbbecf7a96aeca1565f2b02eb671a1f0b6b"
 POSTGRES_PORT = 55432
 POSTGRES_USER = "postgres"
 POSTGRES_PASSWORD = "ulduar"
@@ -33,7 +34,9 @@ POSTGRES_DATABASE = "postgres"
 DEFAULT_DSN = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{HOST}:{POSTGRES_PORT}/{POSTGRES_DATABASE}"
 
 # A community MinIO build, pinned: the official image left Docker Hub (ROADMAP.md, Phase 0 sign-off S5).
-OBJECT_STORE_IMAGE = "pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
+OBJECT_STORE_IMAGE = (
+    "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372"
+)
 OBJECT_STORE_PORT = 59000
 OBJECT_STORE_ACCESS_KEY = "ulduar"
 OBJECT_STORE_SECRET_KEY = "ulduar-test-only"

@@ -1,0 +1,59 @@
+name: ci-scan
+
+# The weekly look at what the pull-request checks cannot see, because it changes
+# without a commit: known vulnerabilities in the hashed dev lock (pip-audit) and
+# static analysis of the package and its tooling (CodeQL, Python). Scheduled
+# (Monday 05:17 UTC, off the hour on purpose) and runnable by hand; a finding
+# fails the run and CodeQL's alerts appear under the repository's Security tab.
+# Not part of the `CI gate` of ci-tests.yml and not a required check: it runs on
+# the default branch only and a new advisory must not turn every open PR red. No
+# secret is used. pip-audit is pinned exactly (a new release's rules arrive as a
+# reviewed bump, not as a surprise failure); the CodeQL action is pinned by commit SHA
+# like every action here.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pip-audit:
+    name: Audit the dev lock for known vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit==2.10.1
+      # Reads the lock itself, in its own throwaway environment, hashes required.
+      - name: Audit requirements/dev.lock
+        run: pip-audit --require-hashes -r requirements/dev.lock
+
+  codeql:
+    name: Analyze the code with CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          languages: python
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          category: "/language:python"
