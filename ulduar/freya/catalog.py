@@ -11,11 +11,11 @@ step's own function and retries (`insert_with_partition_retry`, shared with line
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 from uuid import UUID
 
 import psycopg
@@ -26,6 +26,9 @@ from ulduar import _db, _ids
 from ulduar.config import NAME_PATTERN, ArchivumSettings, Config
 from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import ledger
+
+if TYPE_CHECKING:
+    from ulduar.freya.lineage import LineageEdge, LineageNode
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +338,40 @@ class Catalog:
         with self._transaction(f"Finding artifacts of project {self.project.name}") as tx:
             rows = tx.execute(query, (self.project.project_id, *given.values())).fetchall()
         return [Artifact(*row) for row in rows]
+
+    # NOTE: the lineage calls import `lineage` inside the method: it imports this module for `NodeRef`, `Dataset`
+    # and `insert_with_partition_retry`, so a top-level import here would be circular.
+    def add_lineage(
+        self,
+        child: Artifact | Dataset | NodeRef,
+        parents: Sequence[Artifact | Dataset | NodeRef],
+        *,
+        run_id: UUID | None = None,
+    ) -> list[LineageEdge]:
+        """Record that *child* was derived from each of *parents* (all edges or none); *run_id* names the run.
+
+        `ValueError` for no parents or a node derived from itself; `UnknownRecordError` for a node that is not
+        in this project; `LineageCycleError` when an edge would close a cycle.
+        """
+        from ulduar.freya import lineage
+
+        return lineage.add_edges(self, child, parents, run_id)
+
+    def ancestors(self, node: Artifact | Dataset | NodeRef, *, max_depth: int | None = None) -> list[LineageNode]:
+        """What *node* was derived from, directly or not: each node once at its minimum depth, nearest first.
+
+        Ordered by depth, kind and id; *node* itself is not included; *max_depth* (at least 1) limits the walk.
+        A node that is unknown, or has no edges, has no ancestors.
+        """
+        from ulduar.freya import lineage
+
+        return lineage.walk(self, "ancestors", node, max_depth)
+
+    def descendants(self, node: Artifact | Dataset | NodeRef, *, max_depth: int | None = None) -> list[LineageNode]:
+        """What was derived from *node*, directly or not; ordered and limited as `ancestors`."""
+        from ulduar.freya import lineage
+
+        return lineage.walk(self, "descendants", node, max_depth)
 
 
 def _select_artifact(tx: Connection, project_id: UUID, artifact_id: UUID) -> Artifact | None:

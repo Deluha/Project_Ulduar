@@ -15,7 +15,7 @@ public exceptions, the record identifiers and the first component, Freya (`freya
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
-| `freya/` | Freya's facade, schema ledger, SQL steps, catalog session and the ledger-role history calls (`freya/README.md`) |
+| `freya/` | Freya's facade, schema ledger, SQL steps, catalog session, lineage and the ledger-role history calls (`freya/README.md`) |
 
 ## How it works
 
@@ -53,8 +53,8 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   credential's value.
 - One runtime dependency: `psycopg>=3.2,<4` (needs a system libpq 16 or newer; the extra
   `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision.
-- The public Freya surface (`ulduar.freya`: `open_catalog`, the onboarding, retention and redaction calls and
-  their records): `freya/README.md`.
+- The public Freya surface (`ulduar.freya`: `open_catalog` with its register, find, lineage, ancestors and
+  descendants calls, the onboarding, retention and redaction calls, and their records): `freya/README.md`.
 - Logging: library code logs through loggers under `ulduar.*`, adds no handler and never touches the root
   logger.
 

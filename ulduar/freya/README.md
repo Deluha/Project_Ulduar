@@ -6,8 +6,8 @@ Freya is the catalog and lineage component; its database is the Archivum (Postgr
 every object in schema `ulduar`). It holds the schema half (the versioned-SQL ledger, the step that creates
 the Phase 1 schema, the checks that refuse a schema this library cannot serve) and the catalog half: a
 project's datasets and artifacts registered through a catalog session, and the ledger-role calls that
-onboard a project, declare and apply history retention and redact a value. The lineage calls arrive in the
-next commit of Phase 1.
+onboard a project, declare and apply history retention and redact a value; and lineage: "derived from" edges between artifacts and datasets, with ancestors and
+descendants queries.
 
 ## Files & entry points
 
@@ -16,6 +16,7 @@ next commit of Phase 1.
 | `__init__.py` | The facade: re-exports the public surface listed under Interfaces & contracts |
 | `ledger.py` | `load_steps`, `install`, `check_schema`, `schema_status`, `library_release`, `open_ledger_connection`, the bootstrap, `LEDGER_LOCK_KEY` |
 | `catalog.py` | The records (`Project`, `Dataset`, `Artifact`, `NodeRef`), `ARTIFACT_KINDS`, `open_catalog` and `Catalog`, `insert_with_partition_retry` |
+| `lineage.py` | `LineageEdge`, `LineageNode`; the edge insert and the ancestor and descendant walks that `Catalog` delegates to |
 | `history.py` | Ledger-role calls: `onboard_project`, `declare_history_retention`, `apply_history_retention`, `redact`; the only code that issues `UPDATE` or `DELETE` against history |
 | `steps/0001_catalog.sql` | Step 1: roles, tables, functions, triggers, partitions, row-level security and grants |
 
@@ -88,6 +89,21 @@ next commit of Phase 1.
   and runs the insert once more (the same id, so it cannot duplicate). Partitions are never created any other
   way (hard rule 7).
 
+### Lineage
+
+- `Catalog.add_lineage(child, parents, *, run_id=None)` records that `child` was derived from each parent, one
+  UUIDv7 per edge, in one transaction (all edges or none) through the partition retry; a node is an
+  `Artifact`, a `Dataset` or a `NodeRef`. The trigger of step 1, under a per-project lock, refuses a node that
+  is not in the project (`UnknownRecordError`, SQLSTATE `UL002`) and an edge that would close a cycle
+  (`LineageCycleError`, `UL001`); a self-edge and an empty parent list are a `ValueError` before any SQL. An
+  edge is a recorded fact: recording the same one again records another edge, which the queries fold.
+- `ancestors(node, *, max_depth=None)` and `descendants(...)` are one recursive query each (`UNION` on kind,
+  id and depth, bounded by `max_depth` when given), keeping each node once at its minimum depth; ordered by
+  depth, kind and id; the node itself is not in the result; `max_depth` must be at least 1. A node the project
+  does not hold, or that has no edges, has an empty result. Row-level security limits a walk to the project.
+- An edge ages out by its own `lineage_edge` retention rule, so a walk may name a node whose record has aged
+  out of `artifact`.
+
 ### History: onboarding, retention, redaction
 
 All of these run as the ledger role (`archivum.ledger_dsn_env`, else `ConfigurationError`), in one
@@ -133,7 +149,10 @@ ends with the transaction).
   - `get_artifact(artifact_id) -> Artifact` (`UnknownRecordError`); `find_artifacts(*, checksum=None,
     kind=None, dataset=None, scope=None) -> list[Artifact]`, ordered by `event_at, artifact_id`.
   - `namespace` 1 to 200 and `name` 1 to 500 characters; `scope` matches `NAME_PATTERN`.
-- Records (frozen): `Project(project_id, name)`; `NodeRef(kind, id)`; `Dataset(dataset_id, project_id, scope,
+  - `add_lineage(child, parents, *, run_id=None) -> list[LineageEdge]`; `ancestors(node, *, max_depth=None)` and
+    `descendants(node, *, max_depth=None) -> list[LineageNode]`.
+- Records (frozen): `LineageEdge(edge_id, child, parent, run_id, event_at, recorded_at)`; `LineageNode(ref,
+  depth)`; `Project(project_id, name)`; `NodeRef(kind, id)`; `Dataset(dataset_id, project_id, scope,
   namespace, name, event_at, recorded_at)` and `Artifact(artifact_id, project_id, scope, kind, checksum, size,
   origin, dataset_id, event_at, recorded_at)`, each with a `ref -> NodeRef`.
 - Ledger role: `onboard_project(config, project, login_role, *, scopes=("default",)) -> Project`;
@@ -158,4 +177,4 @@ schema is an ask-first item.
 
 ## See also
 
-`../README.md` · `../../ROADMAP.md` (Phase 1) · `../../tests/test_freya_ledger.py` · `../../tests/test_freya_catalog.py` · `../../tests/test_freya_history.py`
+`../README.md` · `../../ROADMAP.md` (Phase 1) · `../../tests/test_freya_ledger.py` · `../../tests/test_freya_catalog.py` · `../../tests/test_freya_history.py` · `../../tests/test_freya_lineage.py`

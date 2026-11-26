@@ -1,8 +1,8 @@
 """Freya: the catalog and lineage of a project's data, kept in the Archivum (PostgreSQL).
 
 This facade only re-exports the public surface; the code sits in the modules beside it: the schema ledger
-(`install`, `schema_status`), the catalog session (`open_catalog`, the records) and the ledger-role calls on
-history (onboarding, retention, redaction). The lineage calls arrive in the next commit of Phase 1.
+(`install`, `schema_status`), the catalog session (`open_catalog`, the records, lineage edges and walks) and
+the ledger-role calls on history (onboarding, retention, redaction).
 """
 
 from ulduar.freya.catalog import ARTIFACT_KINDS, Artifact, Catalog, Dataset, NodeRef, Project, open_catalog
@@ -16,12 +16,15 @@ from ulduar.freya.history import (
     redact,
 )
 from ulduar.freya.ledger import SchemaStatus, Step, install, load_steps, schema_status
+from ulduar.freya.lineage import LineageEdge, LineageNode
 
 __all__ = [
     "ARTIFACT_KINDS",
     "Artifact",
     "Catalog",
     "Dataset",
+    "LineageEdge",
+    "LineageNode",
     "NodeRef",
     "Project",
     "Redaction",
