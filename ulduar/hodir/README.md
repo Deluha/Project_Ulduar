@@ -4,7 +4,7 @@
 
 Hodir is the cold archive: immutable, content-addressed storage of files, database dumps, reports and models
 (hard rule 5). The package holds the storage interface and its two backends (a bucket on an S3-compatible server and
-a local directory), the object layout, and the public surface so far: `open_archive` with `put_file`, `put_stream`,
+a local directory), the object layout, and the public surface: `open_archive` with `put_file`, `put_stream`,
 `get`, `get_stream`, `verify`, `reconcile` and `rebuild`, the retention calls `declare_retention` and
 `apply_retention`, `clean_incomplete`, the built-in rule for what an interrupted put left behind, and `purge`, the
 explicit removal of an object archived by mistake.

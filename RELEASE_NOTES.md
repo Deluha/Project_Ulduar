@@ -4,6 +4,31 @@ What shipped, newest first. What is planned: `ROADMAP.md`.
 
 ## v0.1.0 — in development
 
+### Phase 2 — Hodir
+
+The cold archive (`ulduar/hodir/README.md`):
+
+- Configuration: an optional `[archive]` table — a local directory or an S3-compatible bucket, with a writing
+  and a separate deleting credential named by environment variables.
+- Storage: content-addressed objects under a scope slot, never overwritten (conditional writes, SHA-256 checked
+  by the store on every body and part, multipart above 64 MiB); a write-once format marker; one object manifest
+  per registration.
+- `hodir.open_archive`: `put_file`, `put_stream` (spooled, stored only on `commit()`), `get` and `get_stream`
+  (verified before a file is handed over), `verify` (full or a rotating sample), `reconcile` and `rebuild`.
+- Retention: `declare_retention` and `apply_retention` — nothing is deleted unless a class is declared, a dry run
+  by default, the newest copies of a dataset kept, a cap per run, a recorded confirmation to shorten a rule.
+- Deletion: one recorded protocol (intent, then confirmation once no version is left) for retention, the
+  built-in incomplete-put rule (`clean_incomplete`) and `purge`; a put and a deletion of the same content never
+  interleave.
+- Freya: schema step 2, `Catalog.transaction` and `ledger_transaction` for other components,
+  `redact(redaction_id=…)` and `reapply_removals` after a rebuild; an artifact whose object is still archived
+  does not age out of history.
+- The optional extra `project-ulduar[s3]` (`boto3>=1.36,<2`).
+
+Upgrade notes: `freya.install` applies step 2 (additive) to an Archivum installed by Phase 1. The archive's
+bucket needs a writer credential without delete rights, a separate deleter credential, and versioning or a
+conditional-write policy (`ulduar/hodir/README.md`).
+
 ### Phase 1 — Freya
 
 The catalog and lineage, and the Archivum they live in (`ulduar/README.md`, `ulduar/freya/README.md`):
