@@ -240,7 +240,7 @@ D27–D32 and D35–D40 shape the Archivum schema and the object layout from the
 |---|---|---|---|
 | 0 — Development process | v0.1 | Merged | |
 | 1 — Freya | v0.1 | Merged | |
-| 2 — Hodir | v0.1 | In review | |
+| 2 — Hodir | v0.1 | In review | [Deluha/ulduar#9](https://github.com/Deluha/ulduar/pull/9) |
 | 3 — Mimiron | v0.1 | Not started | |
 | 4 — Thorim | v0.1 | Not started | |
 | 5 — Algalon | v0.1 | Not started | |
