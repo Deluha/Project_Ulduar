@@ -577,13 +577,17 @@ class FaultyStore:
         return call
 
 
-@pytest.fixture(params=ARCHIVE_BACKENDS)
-def config(request: pytest.FixtureRequest, archivum: Archivum, tmp_path: Path) -> UlduarConfig:
-    """An onboarded config (project `alpha`) with the archive of each backend in turn."""
-    settings: ArchiveSettings = request.getfixturevalue(ARCHIVE_SETTINGS_FIXTURES[request.param])
+def archive_config(archivum: Archivum, tmp_path: Path, settings: ArchiveSettings) -> UlduarConfig:
+    """An onboarded config (project `alpha`) with the archive of *settings* and a spool directory of its own."""
     spool = tmp_path / "spool"
     spool.mkdir()
     return replace(onboarded(archivum, tmp_path), archive=replace(settings, spool_dir=spool))
+
+
+@pytest.fixture(params=ARCHIVE_BACKENDS)
+def config(request: pytest.FixtureRequest, archivum: Archivum, tmp_path: Path) -> UlduarConfig:
+    """An onboarded config (project `alpha`) with the archive of each backend in turn."""
+    return archive_config(archivum, tmp_path, request.getfixturevalue(ARCHIVE_SETTINGS_FIXTURES[request.param]))
 
 
 @pytest.fixture

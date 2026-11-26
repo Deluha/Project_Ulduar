@@ -16,8 +16,7 @@ the maintenance setting, or in another mode's operation (a mode passes only its 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, get_args
@@ -31,6 +30,7 @@ from ulduar.config import DEFAULT_SCOPE, ArchivumSettings, Config, check_name
 from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import ledger
 from ulduar.freya._records import Connection, Project, qualified
+from ulduar.freya.ledger import ledger_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +126,6 @@ class Redaction:
     event_at: datetime
 
 
-@contextmanager
-def _ledger_transaction(config: Config, purpose: str, what: str) -> Iterator[Connection]:
-    """One transaction as the ledger role, schema checked first; driver errors are raised as the package's."""
-    settings = config.archivum
-    with (
-        ledger.open_ledger_connection(config, purpose) as conn,
-        _db.translated_transaction(conn, settings, what) as tx,
-    ):
-        ledger.check_schema(tx, ledger.load_steps())
-        yield tx
-
-
 def _scalar(cursor: Cursor[TupleRow]) -> Any:
     """The first column of the one row a statement just returned."""
     row = cursor.fetchone()
@@ -145,7 +133,8 @@ def _scalar(cursor: Cursor[TupleRow]) -> Any:
     return row[0]
 
 
-def _project_id(tx: Connection, project: str) -> UUID:
+def lookup_project_id(tx: Connection, project: str) -> UUID:
+    """The id of the onboarded *project*; `UnknownRecordError` when there is none."""
     row = tx.execute(_SELECT_PROJECT_ID, (project,)).fetchone()
     if row is None:
         raise UnknownRecordError(f"Project {project} is not onboarded")
@@ -184,12 +173,12 @@ def onboard_project(
         check_name(scope, "scope")
     if not isinstance(login_role, str) or not login_role:
         raise ValueError(f"The login role {login_role!r} must be a non-empty string")
-    with _ledger_transaction(config, "onboarding", f"Onboarding project {project}") as tx:
+    with ledger_transaction(config, f"Onboarding project {project}", purpose="onboarding") as tx:
         if tx.execute("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s", (login_role,)).fetchone() is None:
             raise UnknownRecordError(f"Login role {login_role} does not exist")
         project_id = _ids.uuid7()
         row = tx.execute(_INSERT_PROJECT, (project_id, project)).fetchone()
-        project_id = row[0] if row is not None else _project_id(tx, project)
+        project_id = row[0] if row is not None else lookup_project_id(tx, project)
         for scope in scopes:
             tx.execute(_INSERT_SCOPE, (project_id, scope))
         tx.execute(_INSERT_MEMBER, (login_role, project_id))
@@ -217,8 +206,8 @@ def declare_history_retention(
     rule_id = _ids.uuid7()
     event_at = _ids.uuid7_time(rule_id)
     what = f"Declaring {history} retention of project {project}"
-    with _ledger_transaction(config, "declaring retention", what) as tx:
-        project_id = _project_id(tx, project)
+    with ledger_transaction(config, what, purpose="declaring retention") as tx:
+        project_id = lookup_project_id(tx, project)
         _lock_retention(tx, project_id, history)
         tx.execute(_INSERT_RULE, (project_id, rule_id, event_at, history, keep_days))
     return RetentionRule(rule_id, project, history, keep_days, event_at)
@@ -374,8 +363,8 @@ def redact(
         raise ValueError(f"Reason {reason!r} is not one of {', '.join(REDACTION_REASONS)}")
     redaction_id = _ids.uuid7()
     value = None if history == "artifact" else f"{_REDACTED_PREFIX}{redaction_id}"
-    with _ledger_transaction(config, "redaction", f"Redacting {history} {record_id}") as tx:
-        project_id = _project_id(tx, project)
+    with ledger_transaction(config, f"Redacting {history} {record_id}", purpose="redaction") as tx:
+        project_id = lookup_project_id(tx, project)
         _maintenance(tx, REDACTION_MODE)
         update = sql.SQL("UPDATE {table} SET {field} = %s WHERE project_id = %s AND {id} = %s").format(
             table=_table(history), field=sql.Identifier(field), id=sql.Identifier(_ID_COLUMNS[history])

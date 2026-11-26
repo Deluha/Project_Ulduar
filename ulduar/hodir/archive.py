@@ -187,6 +187,8 @@ class Archive:
             check_name(retention_class, "retention class")
         artifact_id = _ids.uuid7() if record_id is None else record_id
         _ids.uuid7_time(artifact_id)  # ValueError naming the id when it is not a version 7 UUID
+        project = self.project
+        self._catalog.transaction(f"Checking scope {scope}", lambda tx: _archivum.check_scope(tx, project, scope))
         return _Request(kind, dataset, origin, scope, retention_class, artifact_id)
 
     def put_file(
@@ -206,7 +208,8 @@ class Archive:
         artifact and manifest); *retention_class* is fixed now and names the retention rule that will apply;
         *origin* is a path or id within the source. *record_id* (a UUIDv7) is the idempotency key: a failed
         put repeated with it completes, a finished one returns the same artifact. `ValueError` for a bad
-        argument or a source that is not a regular file (a symbolic link included), before any storage I/O;
+        argument or a source that is not a regular file (a symbolic link included), and `UnknownRecordError` for a
+        scope the project lacks, both before any storage I/O;
         `UlduarError` when *record_id* names an artifact with other content, manifest or retention class.
         """
         request = self._request(kind, dataset, origin, scope, retention_class, record_id)
@@ -341,8 +344,9 @@ class Archive:
         With *sample* N (an integer of at least 1) only the N addresses whose latest passed finding is oldest are
         judged, those never passed first, so repeated samples rotate through every object; otherwise all are.
         One check and one finding per judged address are recorded in one catalog transaction at the end; an
-        `ArchiveUnavailable` propagates and records nothing. An empty scope records a check of 0 objects.
-        `ValueError` for a bad *sample* or *scope*, before any I/O.
+        `ArchiveUnavailable` propagates and records nothing. A scope of the project nothing was archived in records a
+        check of 0 objects.
+        `ValueError` for a bad *sample* or *scope*, before any I/O; `UnknownRecordError` for a scope the project lacks.
         """
         scope = self.scope if scope is None else check_name(scope, "scope")
         if sample is not None and (isinstance(sample, bool) or not isinstance(sample, int) or sample < 1):
@@ -351,6 +355,7 @@ class Archive:
         check_id = _ids.uuid7()
 
         def listing(tx: Connection) -> list[tuple[bytes, int]]:
+            _archivum.check_scope(tx, self.project, scope)
             if sample is None:
                 return _archivum.live_addresses(tx, project_id, scope)
             return _archivum.sample_addresses(tx, project_id, scope, sample)

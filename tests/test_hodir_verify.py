@@ -25,11 +25,12 @@ from tests.conftest import (
     faulty_archive,
     onboarded,
     record_confirmed_deletion,
+    recorder_of,
 )
 from ulduar import _ids
 from ulduar.config import ArchiveSettings, Config
-from ulduar.errors import ArchiveUnavailable
-from ulduar.freya import Artifact, open_catalog
+from ulduar.errors import ArchiveUnavailable, UnknownRecordError
+from ulduar.freya import Artifact, onboard_project, open_catalog
 from ulduar.hodir import Archive, Finding, Verification, _layout, open_archive
 from ulduar.hodir._records import CHECK_OUTCOMES
 from ulduar.hodir._store import WritingStore, open_store
@@ -286,11 +287,23 @@ def test_a_bad_argument_is_refused_before_any_io(
 
 
 def test_a_scope_without_any_registration_is_an_empty_scope(config: Config, archivum: Archivum) -> None:
-    """The check tables hold no foreign key to the scopes, so a scope nothing was archived in verifies 0 objects."""
+    """A scope the project has but nothing was archived in verifies 0 objects and still records the check."""
+    onboard_project(config, "alpha", recorder_of(archivum, config).role, scopes=("default", "empty"))
     with open_archive(config) as session:
-        check = session.verify(scope="elsewhere")
-    assert (check.scope, check.objects_checked) == ("elsewhere", 0)
-    assert [row[1:6] for row in check_rows(archivum)] == [("elsewhere", "verification", "full", 0, 0)]
+        check = session.verify(scope="empty")
+    assert (check.scope, check.objects_checked) == ("empty", 0)
+    assert [row[1:6] for row in check_rows(archivum)] == [("empty", "verification", "full", 0, 0)]
+
+
+def test_a_scope_the_project_lacks_is_refused_and_nothing_is_read_or_recorded(
+    config: Config, archivum: Archivum, source: Path
+) -> None:
+    archive_file(config, source)
+    with faulty_archive(config) as (session, store):
+        with pytest.raises(UnknownRecordError, match="Scope elsewhere is not onboarded for project alpha"):
+            session.verify(scope="elsewhere")
+        assert store.calls == {}
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_check") == 0
 
 
 # --- what counts as archived, and whose it is ---

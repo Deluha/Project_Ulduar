@@ -35,6 +35,7 @@ from ulduar.freya import (
     apply_history_retention,
     declare_history_retention,
     install,
+    ledger_transaction,
     onboard_project,
     open_catalog,
     redact,
@@ -397,6 +398,46 @@ def test_every_ledger_call_without_a_ledger_variable_is_a_configuration_error(
     for call in calls:
         with pytest.raises(ConfigurationError, match="archivum.ledger_dsn_env is not set"):
             call()
+
+
+def test_ledger_transaction_commits_what_it_wrote_and_rolls_back_on_an_error(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    scopes = "SELECT count(*) FROM ulduar.scope WHERE scope = 'extra'"
+    insert = "INSERT INTO ulduar.scope (project_id, scope) SELECT project_id, 'extra' FROM ulduar.project"
+    with ledger_transaction(config, "Adding a scope") as tx:
+        tx.execute(insert)
+        assert tx.execute("SHOW statement_timeout").fetchone() == ("30s",)  # the session's limits, for this transaction
+    assert count(archivum, scopes) == 1
+    with pytest.raises(RuntimeError), ledger_transaction(config, "Adding another scope") as tx:
+        tx.execute(insert.replace("extra", "second"))
+        raise RuntimeError("the work failed")
+    assert count(archivum, "SELECT count(*) FROM ulduar.scope WHERE scope = 'second'") == 0
+
+
+def test_ledger_transaction_raises_a_driver_error_as_the_packages_and_checks_the_schema(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    with pytest.raises(SchemaVersionError, match="not installed"), ledger_transaction(archivum.config(tmp_path), "x"):
+        pass
+    config = onboarded(archivum, tmp_path)
+    with pytest.raises(UlduarError, match="Breaking things failed: ") as caught:
+        with ledger_transaction(config, "Breaking things") as tx:
+            tx.execute("SELECT 1 FROM ulduar.no_such_table")
+    assert not isinstance(caught.value, psycopg.Error)
+
+
+def test_ledger_transaction_without_a_ledger_variable_names_what_needs_the_ledger_role(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = without_ledger(onboarded(archivum, tmp_path))
+    with pytest.raises(ConfigurationError, match="archivum.ledger_dsn_env is not set — Doing a thing needs the ledger"):
+        with ledger_transaction(config, "Doing a thing"):
+            pass
+    with pytest.raises(ConfigurationError, match="— clearing needs the ledger role"):
+        with ledger_transaction(config, "Doing a thing", purpose="clearing"):
+            pass
 
 
 def test_a_ledger_call_before_install_is_a_schema_version_error(archivum: Archivum, tmp_path: Path) -> None:

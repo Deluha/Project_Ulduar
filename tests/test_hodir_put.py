@@ -231,7 +231,20 @@ def test_the_marker_is_canonical_and_checked() -> None:
 def test_the_facade_exports_exactly_the_session_surface() -> None:
     from ulduar import hodir
 
-    assert sorted(hodir.__all__) == ["Archive", "Finding", "PutSink", "Verification", "open_archive"]
+    assert sorted(hodir.__all__) == [
+        "Archive",
+        "ArchiveRetentionRule",
+        "DeletionOutcome",
+        "DueAddress",
+        "Finding",
+        "OpenIntent",
+        "PutSink",
+        "RetentionRun",
+        "Verification",
+        "apply_retention",
+        "declare_retention",
+        "open_archive",
+    ]
 
 
 # --- opening: the format marker ---
@@ -404,9 +417,17 @@ def test_a_source_that_is_not_a_regular_file_is_refused_before_anything_is_store
     assert keys_under(config, "alpha") == []
 
 
-def test_an_artifact_of_a_scope_the_project_lacks_is_unknown(config: Config, source: Path) -> None:
-    with open_archive(config) as session, pytest.raises(UnknownRecordError):
-        session.put_file(source, "log", scope="elsewhere")
+def test_a_scope_the_project_lacks_is_refused_before_anything_is_stored(
+    config: Config, archivum: Archivum, source: Path
+) -> None:
+    with faulty_archive(config) as (session, store):
+        with pytest.raises(UnknownRecordError, match="Scope elsewhere is not onboarded for project alpha"):
+            session.put_file(source, "log", scope="elsewhere")
+        with pytest.raises(UnknownRecordError, match="Scope elsewhere is not onboarded"):
+            session.put_stream("log", scope="elsewhere")
+        assert store.calls == {}
+    assert keys_under(config, "alpha") == []
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 0
 
 
 # --- put_stream ---

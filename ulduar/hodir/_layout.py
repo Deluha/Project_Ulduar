@@ -1,7 +1,8 @@
 """The archive's object layout: every key, the format marker and the manifest, defined once.
 
 Input: project and scope names (`check_name`), checksums, record ids. Output: the store keys of an object, of a
-manifest and of a record; the bytes of the format marker and of a manifest, and their strict readers. Private:
+manifest and of a record; the bytes of the format marker, of a manifest and of a deletion record, and their strict
+readers. Private:
 Hodir's modules import it, a consumer never does. A manifest carries no origin and no dataset name or namespace
 (F18), and no error built here quotes a stored payload (hard rule 11).
 
@@ -13,8 +14,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TypeVar
 from uuid import UUID
 
 from ulduar import _ids
@@ -26,6 +29,8 @@ FORMAT_NAME = "ulduar-archive"
 FORMAT_VERSION = 1
 LAYOUT_KEY = "LAYOUT.txt"
 MANIFEST_FORMAT = 1
+RECORD_FORMAT = 1
+DELETION_TYPE = "archive_deletion"
 CHECKSUM_PREFIX = "sha256:"
 LAYOUT_TEXT = """\
 This is an Ulduar archive (format version 1). Do not change, rename or delete anything in it by hand.
@@ -54,6 +59,26 @@ _MANIFEST_FIELDS = (
     "dataset_id",
     "retention_class",
 )
+_DELETION_FIELDS = (
+    "format",
+    "type",
+    "deletion_id",
+    "event_at",
+    "recorded_at",
+    "project",
+    "scope",
+    "checksum",
+    "size",
+    "stage",
+    "intent_id",
+    "cause",
+    "rule_id",
+    "reason",
+)
+DELETION_STAGES = ("intent", "confirmed", "cancelled")
+DELETION_CAUSES = ("retention", "incomplete_put", "purge")
+PURGE_REASONS = ("personal_data", "secret", "recorded_by_mistake")
+T = TypeVar("T")
 _HEX = re.compile(r"[0-9a-f]{64}")
 _EVENT_AT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
 _OBJECT_TAIL = re.compile(r"(?P<scope>[^/]+)/_objects/sha256/(?P<head>[0-9a-f]{2})/(?P<hash>[0-9a-f]{64})")
@@ -62,6 +87,27 @@ _OBJECT_TAIL = re.compile(r"(?P<scope>[^/]+)/_objects/sha256/(?P<head>[0-9a-f]{2
 def _canonical(value: dict[str, object]) -> bytes:
     """Sorted keys, no spaces, one trailing newline: the same value is always the same bytes."""
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+
+
+def _format_time(moment: datetime) -> str:
+    """ISO 8601 UTC with milliseconds and `Z`."""
+    utc = moment.astimezone(UTC)
+    return f"{utc:%Y-%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
+
+
+def _load_fields(data: bytes, names: tuple[str, ...], noun: str, version: int) -> dict[str, object]:
+    """The JSON object in *data* when it has exactly *names* and `format` *version*; `ArchiveFormatError` otherwise."""
+    try:
+        raw = json.loads(data)
+    except ValueError:
+        raise ArchiveFormatError(f"The {noun} is not valid JSON") from None
+    if not isinstance(raw, dict):
+        raise ArchiveFormatError(f"The {noun} is not a JSON object")
+    if len(raw) != len(names) or any(name not in raw for name in names):
+        raise ArchiveFormatError(f"The {noun} lacks a field or holds one this library does not know")
+    if type(raw["format"]) is not int or raw["format"] != version:
+        raise ArchiveFormatError(f"The {noun} is not format {version}")
+    return {name: raw[name] for name in names}
 
 
 def objects_prefix(project: str, scope: str) -> str:
@@ -144,12 +190,11 @@ class Manifest:
 
     def encode(self) -> bytes:
         """The canonical JSON of the manifest (format `MANIFEST_FORMAT`)."""
-        moment = self.event_at.astimezone(UTC)
         return _canonical(
             {
                 "format": MANIFEST_FORMAT,
                 "artifact_id": str(self.artifact_id),
-                "event_at": f"{moment:%Y-%m-%dT%H:%M:%S}.{moment.microsecond // 1000:03d}Z",
+                "event_at": _format_time(self.event_at),
                 "project": self.project,
                 "scope": self.scope,
                 "kind": self.kind,
@@ -163,41 +208,106 @@ class Manifest:
     @classmethod
     def decode(cls, data: bytes) -> Manifest:
         """The manifest in *data*; `ArchiveFormatError` naming the problem for anything but a format-1 manifest."""
-        try:
-            raw = json.loads(data)
-        except ValueError:
-            raise ArchiveFormatError("The manifest is not valid JSON") from None
-        if not isinstance(raw, dict):
-            raise ArchiveFormatError("The manifest is not a JSON object")
-        fields = {name: raw.get(name) for name in _MANIFEST_FIELDS}
-        if len(raw) != len(_MANIFEST_FIELDS) or any(name not in raw for name in _MANIFEST_FIELDS):
-            raise ArchiveFormatError("The manifest lacks a field or holds one this library does not know")
-        if type(fields["format"]) is not int or fields["format"] != MANIFEST_FORMAT:
-            raise ArchiveFormatError(f"The manifest is not format {MANIFEST_FORMAT}")
+        fields = _load_fields(data, _MANIFEST_FIELDS, "manifest", MANIFEST_FORMAT)
         size = fields["size"]
         if type(size) is not int or size < 0:
             raise ArchiveFormatError("The manifest field `size` must be a non-negative integer")
         try:
             return cls(
                 artifact_id=_uuid7(fields["artifact_id"], "artifact_id"),
-                event_at=_event_at(fields["event_at"]),
+                event_at=_event_at(fields["event_at"], "event_at"),
                 project=_name(fields["project"], "project"),
                 scope=_name(fields["scope"], "scope"),
                 kind=_text(fields["kind"], "kind"),
                 checksum=_checksum(fields["checksum"]),
                 size=size,
-                dataset_id=None if fields["dataset_id"] is None else _uuid7(fields["dataset_id"], "dataset_id"),
-                retention_class=None
-                if fields["retention_class"] is None
-                else _name(fields["retention_class"], "retention_class"),
+                dataset_id=_optional(fields["dataset_id"], lambda v: _uuid7(v, "dataset_id")),
+                retention_class=_optional(fields["retention_class"], lambda v: _name(v, "retention_class")),
             )
         except ValueError as e:
-            raise ArchiveFormatError(str(e)) from None
+            raise ArchiveFormatError(f"The manifest field {e}") from None
+
+
+@dataclass(frozen=True, slots=True)
+class DeletionRecord:
+    """One row of `archive_deletion` as stored in `_records/`: an intent, or the outcome of one.
+
+    *project* is the project's name, not its id (a rebuild maps names); *intent_id* is None for an intent and
+    *rule_id* is set exactly for a retention deletion, *reason* exactly for a purge.
+    """
+
+    deletion_id: UUID
+    event_at: datetime
+    recorded_at: datetime
+    project: str
+    scope: str
+    checksum: bytes
+    size: int
+    stage: str
+    intent_id: UUID | None
+    cause: str
+    rule_id: UUID | None
+    reason: str | None
+
+    def encode(self) -> bytes:
+        """The canonical JSON of the record (format `RECORD_FORMAT`, type `archive_deletion`)."""
+        return _canonical(
+            {
+                "format": RECORD_FORMAT,
+                "type": DELETION_TYPE,
+                "deletion_id": str(self.deletion_id),
+                "event_at": _format_time(self.event_at),
+                "recorded_at": _format_time(self.recorded_at),
+                "project": self.project,
+                "scope": self.scope,
+                "checksum": CHECKSUM_PREFIX + self.checksum.hex(),
+                "size": self.size,
+                "stage": self.stage,
+                "intent_id": None if self.intent_id is None else str(self.intent_id),
+                "cause": self.cause,
+                "rule_id": None if self.rule_id is None else str(self.rule_id),
+                "reason": self.reason,
+            }
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> DeletionRecord:
+        """The record in *data*; `ArchiveFormatError` naming the problem for anything but a format-1 deletion record."""
+        fields = _load_fields(data, _DELETION_FIELDS, "deletion record", RECORD_FORMAT)
+        if fields["type"] != DELETION_TYPE:
+            raise ArchiveFormatError(f"The record is not of type {DELETION_TYPE}")
+        size = fields["size"]
+        if type(size) is not int or size < 0:
+            raise ArchiveFormatError("The deletion record field `size` must be a non-negative integer")
+        try:
+            record = cls(
+                deletion_id=_uuid7(fields["deletion_id"], "deletion_id"),
+                event_at=_event_at(fields["event_at"], "event_at"),
+                recorded_at=_event_at(fields["recorded_at"], "recorded_at"),
+                project=_name(fields["project"], "project"),
+                scope=_name(fields["scope"], "scope"),
+                checksum=_checksum(fields["checksum"]),
+                size=size,
+                stage=_choice(fields["stage"], "stage", DELETION_STAGES),
+                intent_id=_optional(fields["intent_id"], lambda v: _uuid7(v, "intent_id")),
+                cause=_choice(fields["cause"], "cause", DELETION_CAUSES),
+                rule_id=_optional(fields["rule_id"], lambda v: _uuid7(v, "rule_id")),
+                reason=_optional(fields["reason"], lambda v: _choice(v, "reason", PURGE_REASONS)),
+            )
+        except ValueError as e:
+            raise ArchiveFormatError(f"The deletion record field {e}") from None
+        if (
+            (record.stage == "intent") != (record.intent_id is None)
+            or (record.cause == "retention") != (record.rule_id is not None)
+            or (record.cause == "purge") != (record.reason is not None)
+        ):
+            raise ArchiveFormatError("The deletion record's stage, cause, intent, rule and reason do not agree")
+        return record
 
 
 def _bad(field: str, wanted: str) -> ValueError:
-    """The problem of one manifest field; the stored value is never quoted."""
-    return ValueError(f"The manifest field `{field}` must be {wanted}")
+    """The problem of one stored field, worded for `The <manifest or record> field ...`; the value is never quoted."""
+    return ValueError(f"`{field}` must be {wanted}")
 
 
 def _text(value: object, field: str) -> str:
@@ -221,13 +331,24 @@ def _uuid7(value: object, field: str) -> UUID:
     return identifier
 
 
-def _event_at(value: object) -> datetime:
+def _event_at(value: object, field: str) -> datetime:
     if not isinstance(value, str) or not _EVENT_AT.fullmatch(value):
-        raise _bad("event_at", "an ISO 8601 UTC time with milliseconds and `Z`")
+        raise _bad(field, "an ISO 8601 UTC time with milliseconds and `Z`")
     try:
         return datetime.strptime(value[:-1], "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=UTC)
     except ValueError:
-        raise _bad("event_at", "an ISO 8601 UTC time with milliseconds and `Z`") from None
+        raise _bad(field, "an ISO 8601 UTC time with milliseconds and `Z`") from None
+
+
+def _choice(value: object, field: str, allowed: tuple[str, ...]) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise _bad(field, f"one of {', '.join(allowed)}")
+    return value
+
+
+def _optional(value: object, read: Callable[[object], T]) -> T | None:
+    """None stays None; anything else is read by *read*."""
+    return None if value is None else read(value)
 
 
 def _checksum(value: object) -> bytes:

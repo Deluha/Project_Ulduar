@@ -180,7 +180,11 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 ### History: onboarding, retention, redaction
 
 All of these run as the ledger role (`archivum.ledger_dsn_env`, else `ConfigurationError`), in one
-transaction each after `ledger.check_schema`; `history.py` is the only code that issues `UPDATE` or `DELETE`
+transaction each after `ledger.check_schema`, through `ledger_transaction(config, what, *, purpose=None)`: a context
+manager yielding a ledger-role connection in one transaction with the session's time limits, after the schema check;
+a driver error is raised as the package's exception, worded `<what> failed: ...`, and `ConfigurationError` without
+the ledger variable names *purpose* (default *what*). It is public, the hook through which Ulduar's components run
+their own ledger-role calls (Hodir's `declare_retention`), the counterpart of `Catalog.transaction`; `history.py` is the only code that issues `UPDATE` or `DELETE`
 against history, each only inside the maintenance setting `ulduar.maintenance` (`set_config(..., true)`, so it
 ends with the transaction).
 
@@ -215,6 +219,8 @@ ends with the transaction).
 ## Interfaces & contracts
 
 - `install(config, *, allow_breaking=False) -> SchemaStatus`: needs `archivum.ledger_dsn_env`.
+- `ledger_transaction(config, what, *, purpose=None)`: see History; `history.lookup_project_id(tx, project)` (the id of
+  an onboarded project, else `UnknownRecordError`) is the module's helper that Hodir's retention shares.
 - `schema_status(config) -> SchemaStatus(applied_step, known_step, pending, min_library_version, compatible)`.
 - Not public: `Step` and `load_steps` stay importable from `ulduar.freya.ledger` for internal use only.
 - `open_catalog(config) -> context manager yielding Catalog` (recording role). `Catalog.project: Project`,
