@@ -10,9 +10,11 @@ passed.
 from __future__ import annotations
 
 import os
+import secrets
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
@@ -20,7 +22,8 @@ import boto3
 import psycopg
 import pytest
 from botocore.config import Config
-from psycopg.conninfo import conninfo_to_dict
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from dev_tools.services import (
     DSN_VARIABLE,
@@ -29,16 +32,20 @@ from dev_tools.services import (
     S3_ENDPOINT_VARIABLE,
     S3_SECRET_KEY_VARIABLE,
 )
+from ulduar.config import Config as UlduarConfig
+from ulduar.config import load_config
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # Marker → the fixtures that make a test need that service.
-SERVICE_FIXTURES = {"db": {"db_dsn", "db_conn"}, "s3": {"s3_settings", "s3_client", "s3_bucket"}}
+SERVICE_FIXTURES = {"db": {"db_dsn", "db_conn", "archivum"}, "s3": {"s3_settings", "s3_client", "s3_bucket"}}
 SERVICE_LABELS = {"db": "database", "s3": "object-store"}
 # libpq reads these when the connection string leaves them out, or (PGHOSTADDR) even when
 # it names a host, so any of them can redirect a local-looking connection string.
 REDIRECTING_VARIABLES = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 S3_SCHEMES = ("http", "https")
 TEST_BUCKET_PREFIX = "ulduar-test-"
+# The shared group role of step 1; the throwaway ledger role must be able to grant it to project roles.
+RECORDER_GROUP = "ulduar_recorder"
 _PROBLEM_KEY = pytest.StashKey[str]()
 _service_test_ids: dict[str, set[str]] = {marker: set() for marker in SERVICE_FIXTURES}
 _service_tests_passed: dict[str, int] = {marker: 0 for marker in SERVICE_FIXTURES}
@@ -198,6 +205,111 @@ def db_conn(db_dsn: str) -> Iterator[psycopg.Connection]:
     """A connection whose uncommitted work is rolled back when the test ends."""
     with rolled_back_connection(db_dsn) as conn:
         yield conn
+
+
+class Recorder(NamedTuple):
+    """A throwaway recording login role: its name and the environment variable holding its DSN."""
+
+    role: str
+    env: str
+
+
+class Archivum:
+    """A throwaway Archivum: an empty database `ulduar_test_<hex>` owned by a throwaway ledger role.
+
+    `config` writes an `ulduar.toml` naming the environment variables that hold the DSNs and returns
+    the loaded `Config`; `new_recorder` makes a login role that belongs to no project until onboarded;
+    `superuser` opens an autocommit connection to the database for a test that must tamper or inspect.
+    """
+
+    def __init__(self, admin_dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._admin_dsn = admin_dsn
+        self._monkeypatch = monkeypatch
+        token = uuid.uuid4().hex[:12]
+        self.database = f"ulduar_test_{token}"
+        self.ledger_role = f"ulduar_test_ledger_{token}"
+        self.ledger_env = f"ULDUAR_TEST_{token.upper()}_LEDGER_DSN"
+        self.recorders: list[Recorder] = []
+        self._token = token
+
+    def _dsn(self, role: str, password: str) -> str:
+        return make_conninfo(self._admin_dsn, dbname=self.database, user=role, password=password)
+
+    def _create_login_role(self, admin: psycopg.Connection, role: str, env: str, options: str = "") -> None:
+        password = secrets.token_hex(16)
+        admin.execute(
+            sql.SQL("CREATE ROLE {} LOGIN {} PASSWORD {}").format(
+                sql.Identifier(role), sql.SQL(options), sql.Literal(password)
+            )
+        )
+        self._monkeypatch.setenv(env, self._dsn(role, password))
+
+    def create(self) -> None:
+        """Create the ledger role and the empty database it owns."""
+        with psycopg.connect(self._admin_dsn, autocommit=True) as admin:
+            self._create_login_role(admin, self.ledger_role, self.ledger_env, "CREATEROLE")
+            admin.execute(
+                sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(self.database), sql.Identifier(self.ledger_role)
+                )
+            )
+            if admin.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (RECORDER_GROUP,)).fetchone():
+                admin.execute(
+                    sql.SQL("GRANT {} TO {} WITH ADMIN OPTION").format(
+                        sql.Identifier(RECORDER_GROUP), sql.Identifier(self.ledger_role)
+                    )
+                )
+
+    def new_recorder(self) -> Recorder:
+        """A recording login role that is a member of nothing until the library onboards it."""
+        n = len(self.recorders) + 1
+        recorder = Recorder(f"ulduar_test_rec_{self._token}_{n}", f"ULDUAR_TEST_{self._token.upper()}_REC{n}_DSN")
+        with psycopg.connect(self._admin_dsn, autocommit=True) as admin:
+            self._create_login_role(admin, recorder.role, recorder.env)
+        self.recorders.append(recorder)
+        return recorder
+
+    def config(
+        self, tmp_path: Path, *, project: str = "test-project", recorder: Recorder | None = None, **timeouts: int
+    ) -> UlduarConfig:
+        """Write `ulduar.toml` under *tmp_path* (recording role: *recorder* or a new one) and load it."""
+        recorder = recorder or self.new_recorder()
+        lines = [
+            "version = 1",
+            "[project]",
+            f'name = "{project}"',
+            "[archivum]",
+            f'dsn_env = "{recorder.env}"',
+            f'ledger_dsn_env = "{self.ledger_env}"',
+            *(f"{key} = {value}" for key, value in timeouts.items()),
+        ]
+        path = tmp_path / "ulduar.toml"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return load_config(path)
+
+    @contextmanager
+    def superuser(self) -> Iterator[psycopg.Connection]:
+        """An autocommit superuser connection to the throwaway database."""
+        with psycopg.connect(make_conninfo(self._admin_dsn, dbname=self.database), autocommit=True) as conn:
+            yield conn
+
+    def drop(self) -> None:
+        """Drop the database (closing its sessions) and then every role the fixture made."""
+        with psycopg.connect(self._admin_dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(self.database)))
+            for role in [*(r.role for r in self.recorders), self.ledger_role]:
+                admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+
+@pytest.fixture
+def archivum(db_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[Archivum]:
+    """A throwaway, empty Archivum database with its own ledger role; dropped with its roles after the test."""
+    instance = Archivum(db_dsn, monkeypatch)
+    try:
+        instance.create()
+        yield instance
+    finally:
+        instance.drop()
 
 
 @pytest.fixture(scope="session")

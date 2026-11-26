@@ -13,12 +13,14 @@ description = "A vault and observatory for data projects: catalog and lineage, c
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-# Runtime dependencies are an ask-first decision (CLAUDE.md "Ask first"); none until a phase signs one off.
-dependencies = []
+# Runtime dependencies are an ask-first decision (CLAUDE.md "Ask first"); each is signed off in ROADMAP.md.
+# psycopg needs a system libpq 16 or newer; the `binary` extra brings a bundled one (Phase 1, F32).
+dependencies = ["psycopg>=3.2,<4"]
 
 [project.optional-dependencies]
+binary = ["psycopg[binary]>=3.2,<4"]
 # psycopg and boto3 are the test suite's clients for the local test services only; the
-# package's database and storage clients are decided at the sign-off of Phases 1 and 2.
+# package's storage client is decided at Phase 2's sign-off.
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -32,8 +34,8 @@ dev = [
     "actionlint-py==1.7.12.25",
 ]
 
-[tool.setuptools]
-packages = ["ulduar"]
+[tool.setuptools.packages.find]
+include = ["ulduar", "ulduar.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
