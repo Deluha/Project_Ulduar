@@ -24,8 +24,8 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 ## How it works
 
 - A step is a file `steps/NNNN_<name>.sql`, numbered 1..N without a gap, never edited once released (a new
-  step corrects it; step 1 was edited in place once, before its release, with the owner's approval). Its leading
-  comment lines hold two required headers: `-- ulduar-kind: additive|breaking` and
+  step corrects it; before its first release, step 1 was hardened in place after review, owner-confirmed
+  2026-11-26). Its leading comment lines hold two required headers: `-- ulduar-kind: additive|breaking` and
   `-- ulduar-min-library: X.Y.Z` (the lowest library release that still works once the step is applied).
   The ledger records, per applied step: number, name, kind, the SHA-256 of the file, the minimum library
   version, the applying library version and the time (`ulduar.schema_ledger`).
@@ -95,8 +95,12 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   `drop_empty_partitions` first locks both parent tables (`ACCESS EXCLUSIVE`, which locks every partition
   too), `lineage_edge` before `artifact`, and `ensure_partitions` makes its partitions in the same order
   (`CREATE ... PARTITION OF` locks the parent). That is the order of the only recorder that holds both: an edge
-  insert locks `lineage_edge`, then its trigger reads `artifact`; every other recorder path touches one of the
-  two. So neither function can deadlock with a recorder.
+  insert locks `lineage_edge`, then its trigger reads `artifact`. Creating an `artifact` partition also takes
+  `SHARE ROW EXCLUSIVE` on `dataset`, `scope` and `artifact_kind`, through the cloned foreign keys. The lock
+  order is `lineage_edge`, `artifact`, then {`dataset`, `scope`, `artifact_kind`}: every path takes these tables
+  in that order, or touches only one of them in a transaction (every other recorder path; each count of a
+  retention dry run, which runs in a transaction of its own, as each delete does), so none deadlocks with
+  another.
 
 ### The catalog session
 
@@ -206,8 +210,9 @@ ends with the transaction).
 - Exceptions: `ConfigurationError`, `SchemaVersionError`, `LedgerError`, `ArchivumUnavailable` and the other
   members of `ulduar.errors`.
 - Library log lines (loggers `ulduar.freya.*`, no handler of their own): `info` per applied step
-  (`ledger`), per partition-creating call that made at least one (`_records`, with the count), per onboarding, retention action and redaction
-  (`history`); none carries a connection string, a password or a recorded value.
+  (`ledger`), per month in which a call made at least one partition (`_records`, with the count), per
+  onboarding, retention action and redaction (`history`); none carries a connection string, a password or a
+  recorded value.
 
 ## Extending
 

@@ -56,16 +56,14 @@ CHECKSUM = hashlib.sha256(b"content").digest()
 BLOCKED_WAIT_S = 15
 # The advisory lock step 1's ensure_partitions takes: the first 8 bytes of SHA-256("ulduar.partitions"), signed.
 PARTITION_LOCK_KEY = -6595867142526573570
+_PROBLEM_KEY = pytest.StashKey[str]()
+_service_test_ids: dict[str, set[str]] = {marker: set() for marker in SERVICE_FIXTURES}
+_service_tests_passed: dict[str, int] = {marker: 0 for marker in SERVICE_FIXTURES}
 
 
 def lineage_lock_name(project_id: uuid.UUID) -> str:
     """The text step 1's lineage trigger hashes into its per-project advisory lock (`hashtextextended(..., 0)`)."""
     return f"ulduar.lineage:{project_id}"
-
-
-_PROBLEM_KEY = pytest.StashKey[str]()
-_service_test_ids: dict[str, set[str]] = {marker: set() for marker in SERVICE_FIXTURES}
-_service_tests_passed: dict[str, int] = {marker: 0 for marker in SERVICE_FIXTURES}
 
 
 class S3Settings(NamedTuple):

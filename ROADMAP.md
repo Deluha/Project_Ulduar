@@ -404,6 +404,15 @@ Sign-off decisions (owner, 2026-11-26: F1–F35 confirmed as proposed; F28's ses
 | F32 | Runtime dependency | `psycopg>=3.2,<4`, plus the extra `project-ulduar[binary]` for `psycopg[binary]`. |
 | F33–F35 | CI and toolchain | CI tests Python 3.11 to the newest release `actions/setup-python` offers. The packaging check builds the wheel and imports it outside the checkout. Also: a hashed dev-tool lock, container images pinned by digest, a 90 % branch-coverage floor on `ulduar/`, a weekly `pip-audit` and CodeQL workflow, and GitHub private vulnerability reporting with a threat model in `SECURITY.md`. |
 
+*Amended 2026-11-26, after the phase review (owner-confirmed; step 1 had not been released, so it was edited in
+place):* `ensure_partitions` serialises its callers and tolerates a partition another caller made, runs in UTC
+with ISO dates, accepts times from 15 years back to 2 years ahead and refuses truncate on every partition;
+`ensure_partitions` and `drop_empty_partitions` take `lineage_edge` before `artifact`, the order a lineage
+recorder takes them; the lineage trigger requires READ COMMITTED, which every connection pins; `recorded_at` is
+stamped by the database with `clock_timestamp()`; a maintenance mode admits only its operation (`DELETE` for
+retention, `UPDATE` for redaction); an artifact's dataset is in the artifact's own scope. `add_lineage` takes
+optional edge ids, so a retried call returns the stored edges (F6). `ulduar.config.check_name` is public.
+
 ### Phase 2 — Hodir
 
 | Commit | Content |

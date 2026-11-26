@@ -506,6 +506,29 @@ def test_retention_does_not_deadlock_with_an_edge_recorder_waiting_for_its_proje
     assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 1
 
 
+def test_a_dry_run_does_not_deadlock_with_a_recorder_making_a_partition(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    old_artifacts(config, OLD_DAYS)
+    declare_history_retention(config, "alpha", "artifact", 30)
+    declare_history_retention(config, "alpha", "lineage_edge", 30)
+    long_ago = 430  # a month without a partition: recording there makes the recorder retry through ensure_partitions
+
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=2) as pool:
+        with holder.transaction():
+            holder.execute("LOCK TABLE ulduar.lineage_edge IN ACCESS EXCLUSIVE MODE")
+            recording = pool.submit(old_artifacts, config, long_ago)
+            wait_until_blocked(archivum)  # ensure_partitions is queued first for lineage_edge
+            counting = pool.submit(apply_history_retention, config)
+            # the dry run counted the artifacts and now waits for lineage_edge behind the recorder; the recorder
+            # then needs artifact, which a count still in its transaction would hold: a deadlock
+            wait_until_blocked(archivum, 2)
+        # a deadlock ends one of the two with ArchivumUnavailable; a timeout fails the test instead of hanging it
+        assert len(recording.result(timeout=60)) == 1
+        results = counting.result(timeout=60)
+    assert [(r.history, r.rows) for r in results] == [("artifact", 1), ("lineage_edge", 0)]
+    assert partition_exists(archivum, "artifact", ms_ago(long_ago))
+
+
 @pytest.mark.parametrize("later_keep_days", [None, 1000])
 def test_applying_honours_a_rule_declared_after_it_read_the_rules(
     archivum: Archivum, tmp_path: Path, later_keep_days: int | None
@@ -558,3 +581,26 @@ def test_declaring_waits_for_the_retention_lock_of_its_project_and_history(archi
         holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
         assert declaring.result(timeout=30).keep_days == 30
     assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_rule") == 1
+
+
+def test_among_declares_serialised_by_the_retention_lock_the_one_that_commits_last_wins(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    project_id = count_project_id(archivum)
+    lock = retention_lock_name(project_id, "artifact")
+    earlier = _ids.uuid7()
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=1) as pool:
+        holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
+        declaring = pool.submit(declare_history_retention, config, "alpha", "artifact", 10)
+        wait_until_blocked(archivum)  # the waiter's transaction began here, before the holder's
+        with holder.transaction():  # so the holder's now() is later than the waiter's, though it commits first
+            holder.execute(
+                "INSERT INTO ulduar.history_retention_rule (project_id, rule_id, event_at, history, keep_days)"
+                " VALUES (%s, %s, %s, 'artifact', 20)",
+                (project_id, earlier, _ids.uuid7_time(earlier)),
+            )
+        holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
+        waiter = declaring.result(timeout=30)
+    [result] = apply_history_retention(config)
+    assert result.rule_id == waiter.rule_id  # the later insert, not the later transaction start, is the latest rule

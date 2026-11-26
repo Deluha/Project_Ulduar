@@ -49,11 +49,11 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   statement_timeout_s=30, lock_timeout_s=5, call_budget_s=60)`, `NAME_PATTERN`, `CONFIG_VERSION`,
   `check_name(value, what) -> str` (the name check; raises `ValueError`).
 - `ulduar.errors`: `UlduarError`; `ConfigurationError`; `ArchivumUnavailable` (no connection, a timeout, the
-  call budget, a lost connection, a deadlock (40P01) or a serialization failure (40001)); `SchemaVersionError` (not installed, schema too new or too old,
-  unsupported server); `LedgerError` (changed step, breaking step without its flag, ledger lock);
-  `UnknownRecordError`; `LineageCycleError`; `IsolationError` (refused by row-level security or privileges).
-  A message names the object (project, variable, step, host) and never a connection string, a password or a
-  credential's value.
+  call budget, a lost connection, a deadlock (40P01) or a serialization failure (40001)); `SchemaVersionError`
+  (not installed, schema too new or too old, unsupported server); `LedgerError` (changed step, breaking step without
+  its flag, ledger lock); `UnknownRecordError`; `LineageCycleError`; `IsolationError` (refused by row-level security
+  or privileges). A message names the object (project, variable, step, host) and never a connection string, a
+  password or a credential's value.
 - One runtime dependency: `psycopg>=3.2,<4` (needs a system libpq 16 or newer; the extra
   `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision.
 - The public Freya surface (`ulduar.freya`: `open_catalog` with its register, find, lineage, ancestors and

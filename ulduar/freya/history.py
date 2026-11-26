@@ -264,6 +264,19 @@ def _delete_older(tx: Connection, rule: _LimitedRule, cutoff: datetime) -> int:
     return removed
 
 
+def _count_rule(conn: Connection, settings: ArchivumSettings, rule: _LimitedRule, now: datetime) -> RetentionResult:
+    """What applying *rule* would remove, counted in a transaction of its own.
+
+    One count per transaction keeps the lock order of every other path: a transaction that counted the
+    artifacts and then the edges would hold `artifact` while it waits for `lineage_edge`, the reverse of
+    the order of the partition functions and of an edge recorder.
+    """
+    cutoff = rule.cutoff(now)
+    with _db.translated_transaction(conn, settings, f"Counting {rule.history} of project {rule.project}") as tx:
+        rows = _count_older(tx, rule, cutoff)
+    return RetentionResult(rule.project, rule.history, rule.rule_id, cutoff, rows, True)
+
+
 def _apply_rule(
     conn: Connection, settings: ArchivumSettings, rule: _LimitedRule, now: datetime
 ) -> RetentionResult | None:
@@ -307,13 +320,8 @@ def apply_history_retention(
         with _db.translated_transaction(conn, settings, "Reading the retention rules") as tx:
             ledger.check_schema(tx, ledger.load_steps())
             rules = _limited_rules(tx)
-            if dry_run:
-                return [
-                    RetentionResult(
-                        r.project, r.history, r.rule_id, r.cutoff(now), _count_older(tx, r, r.cutoff(now)), True
-                    )
-                    for r in rules
-                ]
+        if dry_run:
+            return [_count_rule(conn, settings, rule, now) for rule in rules]
         results = [result for rule in rules if (result := _apply_rule(conn, settings, rule, now)) is not None]
         if not results:
             logger.info("no retention rule keeps a history for a limited time — nothing to apply")

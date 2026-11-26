@@ -213,7 +213,9 @@ CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.redaction FOR EACH STAT
 -- [now() - 15 years, now() + 2 years], which keeps every partition name's year at four digits; outside it the
 -- call raises. TimeZone and DateStyle are pinned so the bounds never depend on the caller's session.
 -- Each partition gets the refuse_truncate trigger (the parent's is not inherited). lineage_edge is done before
--- artifact: CREATE ... PARTITION OF locks the parent, and that is the lock order of an edge recorder.
+-- artifact: CREATE ... PARTITION OF locks the parent, and that is the lock order of an edge recorder. Creating
+-- an artifact partition also takes SHARE ROW EXCLUSIVE on dataset, scope and artifact_kind, through the cloned
+-- foreign keys. The lock order of every path is lineage_edge, artifact, then {dataset, scope, artifact_kind}.
 CREATE FUNCTION ulduar.ensure_partitions(for_time timestamptz, months_ahead integer DEFAULT 3) RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
@@ -247,9 +249,10 @@ $$;
 -- Drops the empty monthly partitions that ended on or before the given time; a partition holding any row stays.
 -- The ledger role only (retention). Both parents are locked first, which also locks every partition: no insert
 -- can land in a partition being dropped. The order is lineage_edge, then artifact, the order of the only recorder
--- that holds both (an edge insert locks lineage_edge, then its trigger reads artifact); every other recorder path
--- touches one of the two, so none can deadlock with this function or with ensure_partitions, which creates
--- partitions in the same order.
+-- that holds both (an edge insert locks lineage_edge, then its trigger reads artifact). The rule that keeps these
+-- paths from deadlocking: every path takes lineage_edge, artifact, {dataset, scope, artifact_kind} in that order,
+-- or touches only one of them in a transaction (a recorder's other inserts; the dry run of retention counts each
+-- history in a transaction of its own).
 CREATE FUNCTION ulduar.drop_empty_partitions(before timestamptz) RETURNS integer
   LANGUAGE plpgsql SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$

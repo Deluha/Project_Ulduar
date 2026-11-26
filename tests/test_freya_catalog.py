@@ -201,7 +201,7 @@ def test_an_old_month_without_a_partition_is_created_and_the_insert_retried(
         assert catalog.get_artifact(old.artifact_id) == old
         assert catalog.register_artifact("log", CHECKSUM, 1, record_id=old.artifact_id) == old
     assert partition_exists(archivum, "artifact", long_ago)
-    created = [r.getMessage() for r in caplog.records]
+    created = [r.getMessage() for r in caplog.records if r.name == "ulduar.freya._records"]
     assert len(created) == 1 and created[0].startswith("created 2 time partition(s) for ")  # artifact and edge
     assert _ids.uuid7_time(old.artifact_id).strftime("%Y-%m") in created[0]
 
