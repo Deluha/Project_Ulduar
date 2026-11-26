@@ -90,19 +90,21 @@ def purge(config: Config, *, scope: str, checksum: bytes, reason: str) -> Deleti
             logger.info("purge of object %s in scope %s: skipped, already gone", short, scope)
             sync_records(catalog, store)
             return DeletionOutcome(scope, checksum, size, None, "skipped", CAUSE, "the object is already gone")
-        outcome = delete_address(
-            catalog,
-            deleting,
-            project,
-            scope,
-            checksum,
-            size,
-            cause=CAUSE,
-            reason=reason,
-            still_due=lambda tx: True,
-            manifests=lambda tx: manifest_keys(tx, project, scope, checksum),
-        )
-        sync_records(catalog, store)
+        try:
+            outcome = delete_address(
+                catalog,
+                deleting,
+                project,
+                scope,
+                checksum,
+                size,
+                cause=CAUSE,
+                reason=reason,
+                still_due=lambda tx: True,
+                manifests=lambda tx: manifest_keys(tx, project, scope, checksum),
+            )
+        finally:  # a call that stops on an error still copies the records it wrote, as far as the connection allows
+            sync_records(catalog, store)
     logger.info("purge of object %s in scope %s for %s: %s", short, scope, reason, outcome.stage)
     return outcome
 

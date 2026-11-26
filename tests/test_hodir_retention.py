@@ -16,6 +16,7 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -71,6 +72,7 @@ from ulduar.hodir import (
     open_archive,
 )
 from ulduar.hodir import _store as store_module
+from ulduar.hodir import retention as retention_module
 from ulduar.hodir._records import LatestRule, LiveRegistration
 from ulduar.hodir._store import DeletingStore, open_store
 from ulduar.hodir.retention import _shortens, due_addresses
@@ -1197,6 +1199,41 @@ def test_an_archivum_that_is_too_slow_in_the_deletion_leaves_the_intent_open_and
     assert stages(archivum) == ["intent", "intent", "confirmed"]
 
 
+def test_an_archivum_whose_connection_is_lost_in_the_deletion_stops_the_run_with_the_original_error(
+    config: Config,
+    archivum: Archivum,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+    sessions: list[Any] = []
+    real_open_catalog = retention_module.open_catalog
+
+    @contextmanager
+    def capturing(config: Config) -> Iterator[Any]:
+        with real_open_catalog(config) as catalog:
+            sessions.append(catalog)
+            yield catalog
+
+    monkeypatch.setattr(retention_module, "open_catalog", capturing)
+
+    def lose_the_connection() -> None:
+        sessions[0]._conn.close()  # the private connection, closed as a transaction timeout would leave it
+        raise ArchivumUnavailable("Deleting the object failed: connection lost")
+
+    hook_store(monkeypatch, on_first_delete=lose_the_connection)
+    caplog.set_level(logging.WARNING, logger="ulduar.hodir")
+    with pytest.raises(ArchivumUnavailable):
+        apply_retention(config, dry_run=False)
+    assert stages(archivum) == ["intent"]  # the intent stays open
+    assert any("were not all copied" in record.getMessage() for record in caplog.records)  # the sweep tried
+    monkeypatch.setattr(store_module, "open_store", open_store)
+    [resumed] = apply_retention(config, dry_run=False).outcomes
+    assert resumed.stage == "confirmed" and store_of(config).head(object_key_of(due)) is None
+
+
 def test_a_reconciliation_during_a_deletion_does_not_report_the_object_it_is_removing(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1243,6 +1280,34 @@ def test_a_retried_put_whose_object_was_deleted_since_is_refused_and_registers_n
         again = session.put_file(path, "report", retention_class="short")  # a new record id archives it again
         session.get_stream(again, open(os.devnull, "wb"))
     assert count(archivum, "SELECT count(*) FROM ulduar.archive_registration") == 2
+
+
+def test_a_retried_put_of_a_deleted_artifact_is_refused_before_anything_is_stored(
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record_id = _ids.uuid7()
+    path = tmp_path / "once.bin"
+    path.write_bytes(b"due")
+    with open_archive(config) as session:
+        artifact = session.put_file(path, "report", retention_class="short", record_id=record_id)
+    backdate_registration(archivum, artifact, OLD)
+    declare(config, "short", 30)
+    hook_store(monkeypatch, fail_manifests=True)  # the deletion is confirmed and its manifest stays
+    assert [o.stage for o in apply_retention(config, dry_run=False).outcomes] == ["confirmed"]
+    monkeypatch.setattr(store_module, "open_store", open_store)
+    store = store_of(config)
+    assert store.head(object_key_of(artifact)) is None and store.head(manifest_key_of(artifact)) is not None
+    manifest = store.head(manifest_key_of(artifact))
+    with open_archive(config) as session:
+        with pytest.raises(UlduarError, match=f"^Artifact {record_id} was deleted from the archive; put it again"):
+            session.put_file(path, "report", retention_class="short", record_id=record_id)
+        with pytest.raises(UlduarError, match="was deleted from the archive"):
+            with session.put_stream("report", retention_class="short", record_id=record_id) as sink:
+                sink.write(b"due")
+                sink.commit()
+    assert store.head(object_key_of(artifact)) is None  # the object was not stored again
+    assert store.head(manifest_key_of(artifact)) == manifest  # nor the manifest written again
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_registration") == 1
 
 
 def test_retention_skips_an_object_with_an_open_intent_of_another_cause_and_records_nothing(

@@ -93,8 +93,10 @@ A manifest's `kind` must be one of the artifact kinds.
   size, scope and dataset match and its origin is the request's or none: an artifact adopted from a manifest
   (`clean_incomplete`, a rebuild) has no origin, because a manifest holds none, and the retry returns it as it is.
   If its registration exists but a confirmed deletion of the object came after it (retention removed the object
-  meanwhile), the registration step, under the address lock, refuses with `Artifact <id> was deleted from the archive;
-  put it again under a new record id`, and registers nothing. An object at the key whose size is not the content's is
+  meanwhile), the put refuses with `Artifact <id> was deleted from the archive; put it again under a new record id`,
+  and registers nothing: the first thing a retried put does is that check, in a catalog transaction, before any
+  write to the store (so the deleted artifact's manifest is not written again); the registration step repeats it
+  under the address lock. An object at the key whose size is not the content's is
   `IntegrityError` `Object <key> holds other bytes than its address`, never "disappeared".
 - The address lock is a transaction-scoped advisory lock on (project, scope, checksum), named
   `ulduar.archive:<project_id>:<scope>:<hex>` (`_archivum.address_lock_name`); a deletion (the protocol below) takes
@@ -239,7 +241,11 @@ A manifest's `kind` must be one of the artifact kinds.
   deletes and adopts nothing. A live address the listing did not show is looked at once more before it becomes an
   `entry_without_object`: under its address lock, it must still be live and the store must still lack the object, so
   an object a deletion is removing (transaction 2 running) is never reported, and neither is one put again meanwhile.
-- `Reconciliation(check_id, scope, objects_listed, skipped_young, findings, event_at)`. One `warning` per finding
+  A key the store refuses to read in that look (a symbolic link or a directory where the object belongs: the
+  `IntegrityError` of `head`) is an object Hodir cannot serve: the address is an `entry_without_object`, and the
+  reconciliation goes on. An address whose lock cannot be had in time (an `ArchivumUnavailable`: another session holds
+  it past `archivum.lock_timeout_s`) is left unchecked and counted in `skipped_busy`; it is never a finding.
+- `Reconciliation(check_id, scope, objects_listed, skipped_young, findings, event_at, skipped_busy=0)`. One `warning` per finding
   and one `info` summary (`ulduar.hodir._reconcile`); a reconciliation ends with the record sweep.
 
 ### The incomplete-put rule (`clean_incomplete`)
@@ -269,12 +275,18 @@ A manifest's `kind` must be one of the artifact kinds.
   it raised (the error is re-raised after it). A real run also
   settles the open intents of cause `incomplete_put` in the scopes through the same protocol, ahead of the new
   removals (their `still_due` decides: a live registration or a young object cancels them); a dry run lists them.
-- `CleanupRun(dry_run, adopt, remove, abort, open_intents, outcomes, adopted, datasets_missing)`: the first four are
-  the listing (a dry run fills only these): `Adoption(artifact_id, scope, checksum, size)`, `Orphan(scope,
+- **Stale manifests**: the manifest of an artifact that is registered but no longer archived (a confirmed deletion
+  followed; its manifest delete after the commit had failed) and that is older than the grace is deleted by a real run
+  (`delete_every_version`, an `info` per key). It is harmless until the same content is put again: a rebuild into a new
+  Archivum would adopt it, the object existing again, and bring the deleted artifact back. This is no deletion of an
+  object (the manifest names a registration that is removed, and the deletion is already recorded), so no deletion
+  record is made; a dry run lists the keys.
+- `CleanupRun(dry_run, adopt, remove, abort, open_intents, outcomes, adopted, datasets_missing, stale_manifests)`: the
+  first four and `stale_manifests` (the manifests' keys) are the listing (a dry run fills only these): `Adoption(artifact_id, scope, checksum, size)`, `Orphan(scope,
   checksum, size)` (also the open intents' objects), the `UnfinishedUpload(key, started)`s (Hodir's record: the store's
   upload id stays private). `outcomes` are the deletions, `adopted`
   the artifacts registered (an adoption whose object vanished is logged and left out). A real run adopts first, then
-  removes, then aborts, and ends, like a dry run, with the record sweep. `archive.max_deletions_per_run` does not apply.
+  removes, then deletes the stale manifests, then aborts, and ends, like a dry run, with the record sweep. `archive.max_deletions_per_run` does not apply.
 
 ### Purge (`purge`)
 
@@ -363,15 +375,19 @@ session's connection (`Catalog.transaction`, the recording role); the credential
    registration of the address, live or not, are read in this transaction. Commit, then the outcome's record is
    written to the store (a failure is a `warning`, not an error: the Archivum is the authority, and a later sweep
    writes the missing records), and then the manifests are deleted, best effort: a failure is a `warning`. A manifest
-   that stays is harmless: it names no object, a rebuild adopts a manifest only when its object exists, and
-   `clean_incomplete` treats only a manifest without a registration as a claim on an object. The manifests are
+   that stays names no object and is harmless until the same content is put again: a rebuild adopts a manifest
+   whose object exists, so it would bring the deleted artifact back. A retried put of that artifact is refused before
+   it stores anything, and `clean_incomplete` deletes the manifest once it is past the grace period. The manifests are
    deleted after the commit so the lock is held no longer than the object's own delete (D37 asks no more); the
    keys are those of the registrations known under the lock, so a put that registers the content again afterwards
    keeps its own manifest.
    An `ArchiveUnavailable` from the store (an object-locked version, a refused credential, a timeout) or an
    `ArchivumUnavailable` from the Archivum (a statement, lock or call budget exceeded) rolls transaction 2 back: the
-   intent stays open, the outcome is `open` with the error's message, a `warning` is logged and the run goes on with
-   the next object, so one slow address never aborts a run.
+   intent stays open, the outcome is `open` with the error's message and a `warning` is logged. After an
+   `ArchivumUnavailable` the catalog session is asked `SELECT 1`: when it answers (a statement or lock timeout) the run
+   goes on with the next object; when it does not (a lost connection, as the call budget's transaction timeout
+   leaves) the original error is raised and the run stops, the intent still open for the next run. A run that stops
+   on an error still ends with the record sweep, which fails and is logged when the connection is gone.
 - A put and a deletion of one object serialise on the address lock. A put that began after transaction 2 took it
   waits, then finds the object gone (the deletion confirmed) and stores it again, or finds it still there (the
   deletion was cancelled or stayed open). A put whose registration was committed between the two transactions

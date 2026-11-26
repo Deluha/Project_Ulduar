@@ -247,10 +247,12 @@ def apply_retention(
             )
         outcomes = []
         targets: list[DueAddress | OpenIntent] = [*open_intents, *due]
-        for target in targets:
-            outcomes.append(_delete_one(catalog, deleting, project, target))
-            _log_outcome(outcomes[-1])
-        sync_records(catalog, store)
+        try:
+            for target in targets:
+                outcomes.append(_delete_one(catalog, deleting, project, target))
+                _log_outcome(outcomes[-1])
+        finally:  # a run that stops on an error still copies the records it wrote, as far as the connection allows
+            sync_records(catalog, store)
     result = RetentionRun(False, due, tuple(outcomes), open_intents)
     logger.info(
         "retention applied: %d due, %d open intents resumed, %s",

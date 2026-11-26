@@ -68,7 +68,9 @@ class Reconciliation:
 
     *objects_listed* is how many objects the store holds under the scope's object prefix; *skipped_young* how many
     objects and unfinished uploads were not judged because they are younger than the grace period; *findings* are
-    the disagreements only (outcomes `object_without_entry`, `entry_without_object`, `unfinished_upload`).
+    the disagreements only (outcomes `object_without_entry`, `entry_without_object`, `unfinished_upload`);
+    *skipped_busy* how many live addresses missing from the listing were left unchecked because their address lock
+    was held too long (the grace-free re-check could not be made; none of them is a finding).
     """
 
     check_id: UUID
@@ -77,6 +79,7 @@ class Reconciliation:
     skipped_young: int
     findings: tuple[Finding, ...]
     event_at: datetime
+    skipped_busy: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +214,8 @@ class CleanupRun:
     objects not in *remove*. A real run fills the rest: *adopted* are the artifacts registered (an artifact the
     catalog already held is returned as it is, its origin kept), *outcomes* the deletions, open intents first;
     *datasets_missing* counts the adopted artifacts whose dataset the Archivum does not hold, registered without one.
+    *stale_manifests* (listed by a dry run too, deleted by a real run) are the keys of the manifests, past the grace
+    period, of artifacts registered whose object a confirmed deletion removed: leftovers of that deletion.
     """
 
     dry_run: bool
@@ -221,6 +226,7 @@ class CleanupRun:
     outcomes: tuple[DeletionOutcome, ...] = ()
     adopted: tuple[Artifact, ...] = ()
     datasets_missing: int = 0
+    stale_manifests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

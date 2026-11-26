@@ -67,6 +67,7 @@ from ulduar.hodir import (
     Rebuild,
     Reconciliation,
     UnfinishedUpload,
+    _archivum,
     _layout,
     apply_retention,
     clean_incomplete,
@@ -413,6 +414,51 @@ def test_a_live_address_whose_object_is_gone_is_an_entry_without_an_object(
     assert finding_rows(archivum) == [("entry_without_object", gone.checksum, gone.size)]
 
 
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_a_live_key_that_is_a_link_or_a_directory_is_an_entry_without_an_object(
+    dir_config: Config, archivum: Archivum, tmp_path: Path, replacement: str
+) -> None:
+    [redaction] = make_redactions(dir_config, tmp_path)  # a record the store lacks: the sweep must still run
+    replaced = put(dir_config, tmp_path, b"replaced")
+    path = path_of(dir_config, key_of(b"replaced"))
+    path.parent.chmod(0o755)
+    path.unlink()
+    if replacement == "symlink":
+        target = tmp_path / "elsewhere.bin"
+        target.write_bytes(b"replaced")
+        path.symlink_to(target)
+    else:
+        path.mkdir()
+    with open_archive(dir_config) as session:
+        result = session.reconcile()  # the store refuses the key: it must not raise
+    assert [(f.outcome, f.checksum) for f in result.findings] == [("entry_without_object", replaced.checksum)]
+    assert check_rows(archivum) == [("reconciliation", "full", "default", 1, 1)]
+    assert finding_rows(archivum) == [("entry_without_object", replaced.checksum, replaced.size)]
+    assert [record.identifier for record in stored_records(dir_config)] == [redaction.redaction_id]
+
+
+def test_an_address_whose_lock_is_held_too_long_is_counted_not_reported(
+    config: Config, archivum: Archivum, tmp_path: Path, tamper: Callable[[str, bytes | None], None]
+) -> None:
+    held = put(config, tmp_path, b"held")
+    gone = put(config, tmp_path, b"gone")
+    tamper(key_of(b"held"), None)
+    tamper(key_of(b"gone"), None)
+    config = replace(config, archivum=replace(config.archivum, lock_timeout_s=1))
+    with archivum.superuser() as su:
+        project_id = su.execute("SELECT project_id FROM ulduar.project WHERE name = 'alpha'").fetchone()[0]
+        name = _archivum.address_lock_name(project_id, "default", held.checksum)
+        su.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (name,))  # another session holds the address
+        try:
+            with open_archive(config) as session:
+                result = session.reconcile()
+        finally:
+            su.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (name,))
+    assert [f.checksum for f in result.findings] == [gone.checksum]  # the unchecked address is no finding
+    assert result.skipped_busy == 1
+    assert check_rows(archivum) == [("reconciliation", "full", "default", 0, 1)]
+
+
 def test_a_young_orphan_is_skipped_and_counted_not_reported(config: Config, archivum: Archivum, tmp_path: Path) -> None:
     interrupted(config, tmp_path, b"half", "put_new")  # the object, no manifest and no entry
     with open_archive(config) as session:
@@ -700,6 +746,54 @@ def test_a_retry_with_an_origin_of_a_put_adopted_from_its_manifest_returns_the_a
         with pytest.raises(UlduarError, match="already has a different manifest"):
             session.put_file(retry, "raw_file", origin="src/half.csv", record_id=record_id)
     assert [row[0] for row in registered(archivum)] == [record_id]
+
+
+def test_a_stale_manifest_of_a_confirmed_deletion_is_removed_and_a_rebuild_adopts_only_the_new_artifact(
+    dir_config: Config, archivum: Archivum, second_archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = put_aged(archivum, dir_config, tmp_path, b"again", 100, retention_class="short")
+    declare_retention(dir_config, "alpha", "short", 30, confirm_shortening=True)
+
+    class ManifestsStay:
+        def __init__(self, store: Any) -> None:
+            self._store = store
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._store, name)
+
+        def delete_every_version(self, key: str) -> None:
+            if "/_manifests/" in key:
+                raise ArchiveUnavailable(f"Deleting {key} failed: injected")
+            self._store.delete_every_version(key)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            store_module,
+            "open_store",
+            lambda settings, *, deleting=False: ManifestsStay(open_store(settings, deleting=True)),
+        )
+        [outcome] = apply_retention(dir_config, dry_run=False).outcomes
+    assert outcome.stage == "confirmed" and path_of(dir_config, manifest_key_of(old.artifact_id)).exists()
+    new = put(dir_config, tmp_path, b"again")  # the same content, put again under a new record id
+    deletions = deletion_rows(archivum)
+    young = clean_incomplete(dir_config, dry_run=False)  # the stale manifest is younger than the grace: kept
+    assert (young.stale_manifests, young.outcomes) == ((), ())
+    assert path_of(dir_config, manifest_key_of(old.artifact_id)).exists()
+    backdate(dir_config, manifest_key_of(old.artifact_id))
+    dry = clean_incomplete(dir_config)
+    assert dry.stale_manifests == (manifest_key_of(old.artifact_id),)
+    assert path_of(dir_config, manifest_key_of(old.artifact_id)).exists()  # a dry run deletes nothing
+    run = clean_incomplete(dir_config, dry_run=False)
+    assert run.stale_manifests == (manifest_key_of(old.artifact_id),)
+    assert (run.adopt, run.remove, run.outcomes) == ((), (), ())
+    assert not path_of(dir_config, manifest_key_of(old.artifact_id)).exists()
+    assert path_of(dir_config, manifest_key_of(new.artifact_id)).exists()  # the live artifact keeps its manifest
+    assert deletion_rows(archivum) == deletions  # no deletion record for a manifest
+    assert clean_incomplete(dir_config).stale_manifests == ()
+    second = rebuilt_config(second_archivum, tmp_path, dir_config)
+    with open_archive(second) as session:
+        adopted = session.rebuild().adopted
+    assert [a.artifact_id for a in adopted] == [new.artifact_id]  # the deleted artifact stays gone
 
 
 def test_the_record_sweep_runs_even_when_a_step_of_a_real_run_raises(

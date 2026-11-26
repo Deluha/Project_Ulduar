@@ -103,6 +103,10 @@ _ADDRESS_LIVE = sql.SQL(
     " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %s AND r.scope = %s AND x.checksum = %s AND {archived}(r.project_id, r.artifact_id))"
 ).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"), archived=ARTIFACT_IS_ARCHIVED)
+_DELETED_IDS = sql.SQL(
+    "SELECT r.artifact_id FROM {registration} r WHERE r.project_id = %s AND r.scope = %s"
+    " AND NOT {archived}(r.project_id, r.artifact_id)"
+).format(registration=ARCHIVE_REGISTRATION, archived=ARTIFACT_IS_ARCHIVED)
 _SELECT_SCOPES = sql.SQL("SELECT scope FROM {} WHERE project_id = %s ORDER BY scope").format(qualified("scope"))
 _SELECT_DATASET_BY_ID = sql.SQL(
     "SELECT dataset_id, project_id, scope, namespace, name, event_at, recorded_at FROM {}"
@@ -174,9 +178,21 @@ def insert_registration(
         old = None if row is None else row[0]
         raise UlduarError(f"Artifact {artifact.artifact_id} is already archived with retention class {old!r}")
     if not is_archived(tx, project_id, artifact.artifact_id):
-        raise UlduarError(
-            f"Artifact {artifact.artifact_id} was deleted from the archive; put it again under a new record id"
-        )
+        raise _deleted_error(artifact.artifact_id)
+
+
+def _deleted_error(artifact_id: UUID) -> UlduarError:
+    return UlduarError(f"Artifact {artifact_id} was deleted from the archive; put it again under a new record id")
+
+
+def check_not_deleted(tx: Connection, project_id: UUID, artifact_id: UUID) -> None:
+    """`UlduarError` when the artifact is registered but its object was deleted since: a retried put came too late.
+
+    Nothing is raised for an artifact with no registration (a put that is new, or interrupted before it registered).
+    """
+    registered = tx.execute(_SELECT_CLASS, (project_id, artifact_id)).fetchone() is not None
+    if registered and not is_archived(tx, project_id, artifact_id):
+        raise _deleted_error(artifact_id)
 
 
 def live_addresses(tx: Connection, project_id: UUID, scope: str) -> list[tuple[bytes, int]]:
@@ -411,6 +427,11 @@ def project_scopes(tx: Connection, project_id: UUID) -> list[str]:
 def registered_artifact_ids(tx: Connection, project_id: UUID, scope: str) -> set[UUID]:
     """The ids of the artifacts that have a registration in the scope, live or not."""
     return {row[0] for row in tx.execute(_REGISTERED_IDS, (project_id, scope)).fetchall()}
+
+
+def deleted_artifact_ids(tx: Connection, project_id: UUID, scope: str) -> set[UUID]:
+    """The ids of the artifacts registered in the scope whose object a confirmed deletion removed since."""
+    return {row[0] for row in tx.execute(_DELETED_IDS, (project_id, scope)).fetchall()}
 
 
 def address_is_live(tx: Connection, project_id: UUID, scope: str, checksum: bytes) -> bool:

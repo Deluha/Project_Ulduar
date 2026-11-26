@@ -11,9 +11,11 @@ registered the content after the intent and relied on the object, or the object 
 every version of the object and records `confirmed`. The lock is held for the object's deletes, the check that
 none is left and the outcome row only, so a put of the same content waits for the outcome and then finds the
 object gone or still there, never half-deleted. The manifests of the address are deleted after the commit, best
-effort: a manifest left behind names no object (a rebuild adopts a manifest only when its object exists, and
-`clean_incomplete` treats only a manifest without a registration as a claim). A deletion that cannot finish (a
-version remains, the store refused, the Archivum was slow) leaves the intent open: the next run resumes it.
+effort. A manifest left behind names no object, which is harmless until the same content is put again (a rebuild
+adopts a manifest whose object exists, so it would bring the deleted artifact back): `clean_incomplete` deletes it
+once it is past the grace period, and a retried put of its artifact is refused before it stores anything. A deletion
+that cannot finish (a version remains, the store refused, the Archivum was slow) leaves the intent open: the next run
+resumes it.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import logging
 from collections.abc import Callable
 from uuid import UUID
 
-from ulduar.errors import ArchiveUnavailable, ArchivumUnavailable, IntegrityError
+from ulduar.errors import ArchiveUnavailable, ArchivumUnavailable, IntegrityError, UlduarError
 from ulduar.freya import Catalog, Connection, Project
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._layout import DeletionRecord
@@ -82,13 +84,23 @@ def delete_address(
             f"Deleting object {short} of scope {scope}",
             lambda tx: _settle(tx, store, project, intent, still_due, manifests),
         )
-    except (ArchiveUnavailable, ArchivumUnavailable) as e:  # rolled back: the intent stays open, the run goes on
+    except (ArchiveUnavailable, ArchivumUnavailable) as e:  # rolled back: the intent stays open
+        if isinstance(e, ArchivumUnavailable):
+            _require_connection(catalog, e)  # a lost connection stops the run; a timeout lets it go on
         logger.warning("deletion %s of object %s in scope %s stays open: %s", intent.deletion_id, short, scope, e)
         recorded, stage, detail, leftovers = None, "open", str(e), []
     if recorded is not None:
         _write_record(store, project, recorded)
     _delete_manifests(store, leftovers)
     return DeletionOutcome(scope, checksum, intent.size, intent.deletion_id, stage, intent.cause, detail)
+
+
+def _require_connection(catalog: Catalog, error: ArchivumUnavailable) -> None:
+    """Return when the catalog session answers a trivial statement; else raise *error*, the one that was caught."""
+    try:
+        catalog.transaction("Checking the Archivum connection", lambda tx: tx.execute("SELECT 1"))
+    except UlduarError:
+        raise error from None
 
 
 def _settle(
@@ -150,7 +162,7 @@ def _write_record(store: DeletingStore, project: Project, record: DeletionRecord
 
 
 def _delete_manifests(store: DeletingStore, keys: list[str]) -> None:
-    """Delete the manifests of a confirmed deletion, best effort: one that stays names no object, so it is harmless."""
+    """Delete the manifests of a confirmed deletion, best effort; `clean_incomplete` deletes one that stays."""
     for key in keys:
         try:
             store.delete_every_version(key)

@@ -200,7 +200,8 @@ class Archive:
         put repeated with it completes, a finished one returns the same artifact. `ValueError` for a bad
         argument or a source that is not a regular file (a symbolic link included), and `UnknownRecordError` for a
         scope the project lacks, both before any storage I/O;
-        `UlduarError` when *record_id* names an artifact with other content, manifest or retention class.
+        `UlduarError` when *record_id* names an artifact with other content, manifest or retention class, or one
+        whose object was deleted from the archive since (nothing is stored then: put it again under a new record id).
         """
         request = self._request(kind, dataset, origin, scope, retention_class, record_id)
         digest = hashlib.sha256()
@@ -447,6 +448,11 @@ class Archive:
     def _put(self, request: _Request, path: Path, size: int, sha256: bytes) -> Artifact:
         """Store *path* (*size* bytes hashing to *sha256*) and register it: object, manifest, artifact, registration."""
         project = self.project
+        if request.explicit_id:  # a retry whose artifact was deleted since is refused before anything is stored
+            self._catalog.transaction(
+                f"Checking that artifact {request.artifact_id} was not deleted",
+                lambda tx: _archivum.check_not_deleted(tx, project.project_id, request.artifact_id),
+            )
         key = _layout.object_key(project.name, request.scope, sha256)
         stored_new = self._store.put_new(key, path, size, sha256)
         self._write_manifest(request, sha256, size)

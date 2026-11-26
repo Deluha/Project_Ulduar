@@ -42,7 +42,9 @@ CREATE TABLE ulduar.archive_deletion (         -- never ages out, never redacted
   stage       text NOT NULL CHECK (stage IN ('intent', 'confirmed', 'cancelled')),
   intent_id   uuid,                              -- NULL for an intent; the intent's id for its outcome
   cause       text NOT NULL CHECK (cause IN ('retention', 'incomplete_put', 'purge')),
-  rule_id     uuid,                              -- retention: the archive_retention_rule applied (not a foreign key: a rebuild restores deletion records into an Archivum that may lack the rule)
+  -- retention: the archive_retention_rule applied (not a foreign key: a rebuild restores deletion records into an
+  -- Archivum that may lack the rule)
+  rule_id     uuid,
   reason      text CHECK (reason IN ('personal_data', 'secret', 'recorded_by_mistake')),  -- purge only
   CHECK ((stage = 'intent') = (intent_id IS NULL)),
   CHECK ((cause = 'retention') = (rule_id IS NOT NULL)),
@@ -180,9 +182,9 @@ $$;
 -- Drops the empty monthly partitions that ended on or before the given time; a partition holding any row stays.
 -- The ledger role only (retention). The four parents are locked first, which also locks every partition: no
 -- insert can land in a partition being dropped. The order is lineage_edge, artifact, archive_check,
--- archive_finding, the order in which ensure_partitions takes those four; every path takes them in that order, or touches only one
--- of them in a transaction (a recorder's other inserts; the dry run of retention counts each history in a
--- transaction of its own).
+-- archive_finding, the order in which ensure_partitions takes those four; every path takes them in that order, or
+-- touches only one of them in a transaction (a recorder's other inserts; the dry run of retention counts each
+-- history in a transaction of its own).
 CREATE OR REPLACE FUNCTION ulduar.drop_empty_partitions(before timestamptz) RETURNS integer
   LANGUAGE plpgsql SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
