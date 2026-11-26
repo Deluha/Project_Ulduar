@@ -5,7 +5,7 @@ This facade only re-exports the public surface; the code sits in the modules bes
 the ledger-role calls on history (onboarding, retention, redaction).
 """
 
-from ulduar.freya._records import Artifact, Dataset, LineageEdge, LineageNode, NodeRef, Project
+from ulduar.freya._records import Artifact, Connection, Dataset, LineageEdge, LineageNode, NodeRef, Project
 from ulduar.freya.catalog import ARTIFACT_KINDS, Catalog, open_catalog
 from ulduar.freya.history import (
     Redaction,
@@ -22,6 +22,7 @@ __all__ = [
     "ARTIFACT_KINDS",
     "Artifact",
     "Catalog",
+    "Connection",
     "Dataset",
     "LineageEdge",
     "LineageNode",

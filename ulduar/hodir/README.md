@@ -3,20 +3,78 @@
 ## Purpose & scope
 
 Hodir is the cold archive: immutable, content-addressed storage of files, database dumps, reports and models
-(hard rule 5). So far the package holds only its foundation, the private storage interface and its two backends:
-a bucket on an S3-compatible server and a local directory. The facade's public calls (put, verify, restore,
-retention) arrive in later Phase 2 commits, so `__all__` is empty and a consumer imports nothing from here yet.
+(hard rule 5). The package holds the storage interface and its two backends (a bucket on an S3-compatible server and
+a local directory), the object layout, and the writing half of the public surface: `open_archive` with `put_file`
+and `put_stream`. The reading, verifying and retention calls arrive in later Phase 2 commits.
 
 ## Files & entry points
 
 | File | Holds |
 |---|---|
-| `__init__.py` | The facade; its public surface is empty for now |
+| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink` |
+| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`) and `PutSink` |
+| `_layout.py` | Private: the one home of the object layout: the keys, the format marker, the layout text, the `Manifest` |
+| `_archivum.py` | Private: Hodir's SQL, the address lock and the registration insert |
 | `_store.py` | Private: the `WritingStore` and `DeletingStore` protocols, `StoredObject`, `UnfinishedUpload`, `open_store`, `check_key` (the one key validator), `check_size`, `part_size`, `open_regular` and the size constants |
 | `_directory.py` | Private: `DirectoryStore` and `DirectoryDeletingStore` |
 | `_s3.py` | Private: `S3Store` and `S3DeletingStore` on a boto3 client, the transport guard `check_endpoint`, the error translation |
 
 ## How it works
+
+### The layout (`_layout.py`)
+
+All keys are relative to the store's prefix (`[archive] prefix`), with `<project>` and `<scope>` names that match
+`NAME_PATTERN`; the fixed segments start with `_`, which no scope can, so later scope levels fit between
+`<project>/` and `/_objects` without moving a key.
+
+| Key | Holds |
+|---|---|
+| `ulduar-archive.json` | The format marker `{"format":"ulduar-archive","version":1}`, written once, checked on every open |
+| `LAYOUT.txt` | A plain-text description of this layout, written once beside the marker |
+| `<project>/<scope>/_objects/sha256/<h[0:2]>/<h>` | The object: its bytes, named by the SHA-256 of those bytes in lower-case hex; written once, never overwritten |
+| `<project>/<scope>/_manifests/<yyyy>/<mm>/<artifact_id>.json` | One manifest per registration (month of the artifact id, UTC) |
+| `<project>/_records/<yyyy>/<mm>/<record_id>.json` | Maintenance records (later commits) |
+
+A manifest is canonical JSON (sorted keys, no spaces, a trailing newline): `format` 1, `artifact_id`, `event_at`
+(ISO 8601 UTC with milliseconds and `Z`), `project`, `scope`, `kind`, `checksum` (`sha256:<hex>`), `size`,
+`dataset_id` and `retention_class` (both null when absent). It holds no origin and no dataset name or namespace, so
+nothing that may later be redacted. `Manifest.decode` is strict: invalid JSON, a missing or unknown field, a wrong
+type or another `format` is an `ArchiveFormatError` that names the problem and never quotes the payload.
+
+### Opening and putting
+
+- `open_archive(config)` needs the `[archive]` section (`ConfigurationError`), opens the Freya catalog session as the
+  recording role and the writing store, then makes sure of the format: a store without a marker gets the marker and
+  `LAYOUT.txt` (each written once), and the marker the store then holds is always read back and checked
+  (`ArchiveFormatError`: another format, or "the archive has format version N; this library knows version 1").
+  `Archive.project` and `Archive.scope` are the catalog's. One `Archive` serves one thread; a thread opens its own.
+- `put_file(path, kind, *, dataset=None, origin=None, scope=None, retention_class=None, record_id=None) -> Artifact`
+  validates before any I/O (`ValueError`: the kind, the origin, the scope and the retention class as names, a
+  `record_id` that is not a UUIDv7, a source that is not a regular file or is a symbolic link), then, in this order:
+  hashes the file in 1 MiB chunks; stores the object (`put_new`: an object that exists is relied on);
+  writes the manifest (an existing one under that artifact id must decode to the same manifest, else
+  `UlduarError`); registers the artifact in the catalog (`record_id` is the idempotency key); and, in one catalog
+  transaction under the address lock, checks that the object is there and writes the registration.
+  The order is object, manifest, artifact, registration (D31): a failure leaves at worst an object without an
+  entry, never a registration without its object, and the same put repeated with the same `record_id` completes.
+  Putting the same content twice is one object with two manifests, artifacts and registrations.
+- The address lock is a transaction-scoped advisory lock on (project, scope, checksum), named
+  `ulduar.archive:<project_id>:<scope>:<hex>` (`_archivum.address_lock_name`); a deletion (later commits) takes the
+  same lock, so a put and a deletion of one object are ordered. A put that finds the object missing under the lock
+  stores it again, once; a second miss is an `IntegrityError` and nothing is registered.
+- A registration's `retention_class` is fixed at archive time (NULL keeps for ever). Registering an artifact
+  again with another class is a `UlduarError`; so is a repeat of a `record_id` with another class, which differs
+  in its manifest first.
+- `put_stream(kind, **same keywords)` is a context manager yielding a `PutSink`: `write(bytes)` spools to a
+  `0o600` file in `spool_dir` (the system temporary directory by default) while hashing, refusing growth past
+  `spool_limit_gib` with `UlduarError`; `commit()` stores it as `put_file` does (no second hashing) and returns the
+  artifact, the same one when called again. Leaving the block without `commit`, or with an exception, stores
+  nothing; the spool is always deleted. A sink refuses writes after `commit`, after its block, and after the limit
+  error.
+- Each put logs one `info` line (`ulduar.hodir.archive`): the first 12 hex digits of the checksum, the size, the
+  scope and whether the object was new or already stored; no origin, no name.
+
+### The storage interface
 
 - `open_store(settings, *, deleting=False)` chooses the backend from `[archive]` (`ulduar/README.md`) and returns a
   writing store, or with `deleting=True` a deleting one. The writing classes have no delete method at all; the
@@ -68,13 +126,18 @@ retention) arrive in later Phase 2 commits, so `__all__` is empty and a consumer
 
 ## Interfaces & contracts
 
-- Nothing public yet. Private, for the next commits: `open_store`, `WritingStore`, `DeletingStore`,
-  `StoredObject(key, size, modified, immediate)`, `UnfinishedUpload(key, upload_id, started)`, `check_key`.
-- Exceptions (`ulduar.errors`): `ArchiveUnavailable`, `IntegrityError`, `ArchiveFormatError` (not raised yet),
-  `ConfigurationError` for an unset variable a setting names, a missing directory, a refused endpoint, a missing
+- Public: `open_archive(config)` (a context manager yielding `Archive`), `Archive.project`, `Archive.scope`,
+  `Archive.put_file(...)`, `Archive.put_stream(...)` and `PutSink` (`write`, `commit`), as described above.
+  `Archive(catalog, store, settings)` is constructible directly (a test injects a wrapped store).
+- Private: `open_store`, `WritingStore`, `DeletingStore`, `StoredObject(key, size, modified, immediate)`,
+  `UnfinishedUpload(key, upload_id, started)`, `check_key`, the `_layout` functions and `Manifest`.
+- Exceptions (`ulduar.errors`): `ArchiveUnavailable`, `IntegrityError`, `ArchiveFormatError` (a foreign marker or
+  version, a manifest that is not format 1), `UnknownRecordError` (a scope the project lacks), `UlduarError`
+  (another manifest or retention class under a `record_id`, a stream past the spool limit), `ConfigurationError`
+  for no `[archive]`, an unset variable a setting names, a missing directory, a refused endpoint, a missing
   `deleter` or a missing extra.
-- Library log lines (loggers `ulduar.hodir.*`): `debug` per stored object and deletion, `warning` for a skipped
-  link or a failed abort; none carries a credential or an address.
+- Library log lines (loggers `ulduar.hodir.*`): `info` per put (`archive`), `debug` per stored object and deletion,
+  `warning` for a skipped link or a failed abort; none carries a credential or an address.
 
 ## Extending
 
@@ -84,4 +147,4 @@ to a writing class (hard rule 5); the object layout and checksum definition are 
 
 ## See also
 
-`../README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py`
+`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py`

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -38,7 +39,7 @@ from ulduar.freya import (
     open_catalog,
     redact,
 )
-from ulduar.freya.history import MAINTENANCE_SETTING, retention_lock_name
+from ulduar.freya.history import HISTORIES, MAINTENANCE_SETTING, retention_lock_name
 
 OLD_DAYS = 200
 OLDER_DAYS = 300
@@ -604,3 +605,127 @@ def test_among_declares_serialised_by_the_retention_lock_the_one_that_commits_la
         waiter = declaring.result(timeout=30)
     [result] = apply_history_retention(config)
     assert result.rule_id == waiter.rule_id  # the later insert, not the later transaction start, is the latest rule
+
+
+# --- artifacts whose object is archived, and the check histories (step 2) ---
+
+
+def register_archived(config: Config, artifact_ids: list[uuid.UUID]) -> None:
+    """Register the artifacts' objects as archived, as the recording role does through the catalog's hook."""
+
+    def work(tx: psycopg.Connection) -> None:
+        for artifact_id in artifact_ids:
+            tx.execute(
+                "INSERT INTO ulduar.archive_registration (project_id, scope, artifact_id, event_at)"
+                " SELECT project_id, scope, artifact_id, event_at FROM ulduar.artifact WHERE artifact_id = %s",
+                (artifact_id,),
+            )
+
+    with open_catalog(config) as catalog:
+        catalog.transaction("Registering test objects", work)
+
+
+def confirm_deletion(config: Config) -> None:
+    """Record, as the recording role, an intent and its confirmation for the content of `CHECKSUM` in `default`."""
+
+    def work(tx: psycopg.Connection) -> None:
+        intent, outcome = _ids.uuid7(), _ids.uuid7()
+        insert = (
+            "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes,"
+            " stage, intent_id, cause) SELECT project_id, %s, %s, 'default', %s, 1, %s, %s, 'incomplete_put'"
+            " FROM ulduar.project WHERE name = 'alpha'"
+        )
+        tx.execute(insert, (intent, _ids.uuid7_time(intent), CHECKSUM, "intent", None))
+        tx.execute(insert, (outcome, _ids.uuid7_time(outcome), CHECKSUM, "confirmed", intent))
+
+    with open_catalog(config) as catalog:
+        catalog.transaction("Recording a test deletion", work)
+
+
+def test_an_artifact_whose_object_is_archived_does_not_age_out_until_a_deletion_is_confirmed(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    [archived, plain, recent] = old_artifacts(config, OLDER_DAYS, OLD_DAYS, 1)
+    register_archived(config, [archived, recent])
+    rule = declare_history_retention(config, "alpha", "artifact", 30)
+    now = datetime.now(UTC)
+    [result] = apply_history_retention(config, now=now)
+    assert (result.rule_id, result.rows) == (rule.rule_id, 1)  # only the one never archived
+    [result] = apply_history_retention(config, dry_run=False, now=now)
+    assert result.rows == 1
+    with open_catalog(config) as catalog:
+        assert {a.artifact_id for a in catalog.find_artifacts()} == {archived, recent}
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_registration") == 2
+    confirm_deletion(config)
+    [result] = apply_history_retention(config, dry_run=False, now=now)
+    assert result.rows == 1  # the old one, its object gone: its registration goes with it
+    with open_catalog(config) as catalog:
+        assert [a.artifact_id for a in catalog.find_artifacts()] == [recent]
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_registration WHERE artifact_id = %s", archived) == 0
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_registration") == 1
+    assert count(archivum, "SELECT sum(rows_removed) FROM ulduar.history_retention_action") == 2
+
+
+def test_a_registration_after_a_confirmed_deletion_archives_the_content_again(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    [before, after] = old_artifacts(config, OLDER_DAYS, OLD_DAYS)
+    register_archived(config, [before])
+    confirm_deletion(config)
+    register_archived(config, [after])  # the same content, stored again after the deletion
+    is_archived = (
+        "SELECT ulduar.artifact_is_archived(project_id, artifact_id) FROM ulduar.artifact WHERE artifact_id = %s"
+    )
+    assert count(archivum, f"SELECT ({is_archived})::int", before) == 0
+    assert count(archivum, f"SELECT ({is_archived})::int", after) == 1
+
+
+def old_check_rows(archivum: Archivum, project: str, days: int) -> None:
+    """An old archive_check and archive_finding, written by superuser (the library never makes history of that age)."""
+    check_id, finding_id = _ids.uuid7(ms_ago(days)), _ids.uuid7(ms_ago(days))
+    with archivum.superuser() as su:
+        su.execute("SELECT ulduar.ensure_partitions(%s, 0)", (_ids.uuid7_time(check_id),))
+        su.execute(
+            "INSERT INTO ulduar.archive_check (project_id, check_id, event_at, scope, kind, mode, objects_checked,"
+            " findings) SELECT project_id, %s, %s, 'default', 'verification', 'full', 1, 0 FROM ulduar.project"
+            " WHERE name = %s",
+            (check_id, _ids.uuid7_time(check_id), project),
+        )
+        su.execute(
+            "INSERT INTO ulduar.archive_finding (project_id, finding_id, event_at, check_id, scope, outcome)"
+            " SELECT project_id, %s, %s, %s, 'default', 'passed' FROM ulduar.project WHERE name = %s",
+            (finding_id, _ids.uuid7_time(finding_id), check_id, project),
+        )
+
+
+@pytest.mark.parametrize("history", ["archive_check", "archive_finding"])
+def test_the_check_histories_age_out_by_their_own_age_and_their_partitions_are_dropped(
+    archivum: Archivum, tmp_path: Path, history: str
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    old_check_rows(archivum, "alpha", OLD_DAYS)
+    old_check_rows(archivum, "alpha", 1)
+    declare_history_retention(config, "alpha", history, 30)  # type: ignore[arg-type]
+    [dry] = apply_history_retention(config)
+    assert (dry.history, dry.rows, dry.dry_run) == (history, 1, True)
+    [result] = apply_history_retention(config, dry_run=False)
+    assert (result.history, result.rows) == (history, 1)
+    assert count(archivum, f"SELECT count(*) FROM ulduar.{history}") == 1
+    other = "archive_finding" if history == "archive_check" else "archive_check"
+    assert count(archivum, f"SELECT count(*) FROM ulduar.{other}") == 2  # a rule covers its own history only
+    assert not partition_exists(archivum, history, ms_ago(OLD_DAYS))
+    assert partition_exists(archivum, other, ms_ago(OLD_DAYS))
+
+
+def test_the_histories_that_age_out_are_the_ones_the_schema_accepts(archivum: Archivum, tmp_path: Path) -> None:
+    onboarded(archivum, tmp_path)
+    with archivum.superuser() as su:
+        row = su.execute(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+            " WHERE conrelid = 'ulduar.history_retention_rule'::regclass AND contype = 'c'"
+            " AND conname = 'history_retention_rule_history_check'"
+        ).fetchone()
+    assert row is not None
+    assert sorted(re.findall(r"'([a-z_]+)'", row[0])) == sorted(HISTORIES)

@@ -6,9 +6,11 @@ and the `Project` an onboarding returns. Each call runs in one transaction after
 
 This module is the only code path that issues `UPDATE` or `DELETE` against recorded history (hard rule 5):
 a retention delete under `ulduar.maintenance` = `retention`, and a redaction under `redaction`, both
-recorded by an appended record in the same transaction as the change. The triggers of step 1 refuse every
-other change, including these from any other role, outside the maintenance setting, or in another mode's
-operation (a mode passes only its own operation: `DELETE:retention`, `UPDATE:redaction`).
+recorded by an appended record in the same transaction as the change. An artifact whose object is still
+archived (`ulduar.artifact_is_archived`) never ages out, and the registrations of the artifacts that do go with
+them. The triggers of step 1 and step 2 refuse every other change, including these from any other role, outside
+the maintenance setting, or in another mode's operation (a mode passes only its own operation:
+`DELETE:retention`, `UPDATE:redaction`).
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from ulduar.freya._records import Connection, Project, qualified
 
 logger = logging.getLogger(__name__)
 
-RetentionHistory = Literal["artifact", "lineage_edge"]
+RetentionHistory = Literal["artifact", "lineage_edge", "archive_check", "archive_finding"]
 RedactionHistory = Literal["artifact", "dataset"]
 RedactionReason = Literal["personal_data", "secret", "recorded_by_mistake"]
 # The histories that age out, the (history, field) pairs that may be redacted, and why: the schema's
@@ -55,6 +57,8 @@ _MEMBER = qualified("project_member")
 _RULE = qualified("history_retention_rule")
 _ACTION = qualified("history_retention_action")
 _REDACTION = qualified("redaction")
+_REGISTRATION = qualified("archive_registration")
+_IS_ARCHIVED = qualified("artifact_is_archived")
 _SELECT_PROJECT_ID = sql.SQL("SELECT project_id FROM {} WHERE name = %s").format(_PROJECT)
 _INSERT_PROJECT = sql.SQL(
     "INSERT INTO {} (project_id, name) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING RETURNING project_id"
@@ -248,16 +252,34 @@ def _table(history: str) -> sql.Identifier:
 
 
 def _count_older(tx: Connection, rule: _LimitedRule, cutoff: datetime) -> int:
+    """The rows `_delete_older` would remove: an artifact whose object is still archived is not counted (H25)."""
     query = sql.SQL("SELECT count(*) FROM {} WHERE project_id = %s AND event_at < %s").format(_table(rule.history))
+    if rule.history == "artifact":
+        query = sql.SQL("{} AND NOT {}(project_id, artifact_id)").format(query, _IS_ARCHIVED)
     count: int = _scalar(tx.execute(query, (rule.project_id, cutoff)))
     return count
+
+
+# An artifact whose object is still archived stays, and the registrations of the artifacts that go are removed in
+# the same statement, so a registration never outlives its artifact.
+_DELETE_ARTIFACTS = sql.SQL(
+    "WITH gone AS ("
+    "DELETE FROM {artifact} WHERE project_id = %s AND event_at < %s AND NOT {archived}(project_id, artifact_id)"
+    " RETURNING project_id, artifact_id), "
+    "registrations AS (DELETE FROM {registration} r USING gone"
+    " WHERE r.project_id = gone.project_id AND r.artifact_id = gone.artifact_id) "
+    "SELECT count(*) FROM gone"
+).format(artifact=qualified("artifact"), archived=_IS_ARCHIVED, registration=_REGISTRATION)
 
 
 def _delete_older(tx: Connection, rule: _LimitedRule, cutoff: datetime) -> int:
     """Delete the project rows of the rule history older than *cutoff* and append the action record, atomically."""
     _maintenance(tx, RETENTION_MODE)
-    query = sql.SQL("DELETE FROM {} WHERE project_id = %s AND event_at < %s").format(_table(rule.history))
-    removed = tx.execute(query, (rule.project_id, cutoff)).rowcount
+    if rule.history == "artifact":
+        removed: int = _scalar(tx.execute(_DELETE_ARTIFACTS, (rule.project_id, cutoff)))
+    else:
+        query = sql.SQL("DELETE FROM {} WHERE project_id = %s AND event_at < %s").format(_table(rule.history))
+        removed = tx.execute(query, (rule.project_id, cutoff)).rowcount
     action_id = _ids.uuid7()
     params = (rule.project_id, action_id, _ids.uuid7_time(action_id), rule.rule_id, rule.history, cutoff, removed)
     tx.execute(_INSERT_ACTION, params)

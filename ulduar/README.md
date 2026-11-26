@@ -5,7 +5,8 @@
 The importable package. It is generic: nothing here names a consumer or assumes a consumer's schema,
 folders or jobs (hard rule 1). Phase 1 adds the configuration file, the connection to the Archivum, the
 public exceptions, the record identifiers and the first component, Freya (`freya/README.md`). Phase 2 adds the
-`[archive]` configuration section and the foundation of Hodir, the cold archive (`hodir/README.md`).
+`[archive]` configuration section and Hodir, the cold archive (`hodir/README.md`), whose first public calls store a
+file or a stream.
 
 ## Files & entry points
 
@@ -16,8 +17,8 @@ public exceptions, the record identifiers and the first component, Freya (`freya
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation (`translate`, `translated`, `translated_transaction`) |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
-| `hodir/` | Hodir's facade (no public calls yet) and, private, the storage interface with its directory and S3 backends (`hodir/README.md`) |
-| `freya/` | Freya's facade, schema ledger, SQL steps, catalog session, lineage and the ledger-role history calls (`freya/README.md`) |
+| `hodir/` | Hodir's facade (`open_archive`, `Archive`, `PutSink`: `put_file`, `put_stream`) and, private, the object layout, the storage interface with its directory and S3 backends (`hodir/README.md`) |
+| `freya/` | Freya's facade, schema ledger, SQL steps (the catalog, then the archive's tables), catalog session with its `transaction` hook, lineage and the ledger-role history calls (`freya/README.md`) |
 
 ## How it works
 
@@ -77,15 +78,16 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   its flag, ledger lock); `UnknownRecordError`; `LineageCycleError`; `IsolationError` (refused by row-level security
   or privileges); `ArchiveUnavailable` (the archive store is unreachable, timed out or refused the credential);
   `IntegrityError` (an archived object does not match its checksum or size, or is missing or unreadable);
-  `ArchiveFormatError` (the store's format marker is missing, foreign or of an unknown version; raised by later
-  Phase 2 commits). A message names the object (project, variable, step, host) and never a connection string, a
-  password or a credential's value.
+  `ArchiveFormatError` (the store's format marker is foreign or of an unknown version, or a manifest is not format 1;
+  raised by `open_archive` and the manifest reader). A message names the object (project, variable, step, host) and
+  never a connection string, a password or a credential's value.
 - One runtime dependency: `psycopg>=3.2,<4` (needs a system libpq 16 or newer; the extra
   `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision. One optional
   extra beside `binary`: `project-ulduar[s3]` (`boto3>=1.36,<2`), the S3 backend's client; without it
   `open_store` raises `ConfigurationError` for an s3 archive.
 - The public Freya surface (`ulduar.freya`: `open_catalog` with its register, find, lineage, ancestors and
-  descendants calls, the onboarding, retention and redaction calls, and their records): `freya/README.md`.
+  descendants calls and the `transaction` hook, the onboarding, retention and redaction calls, and their records):
+  `freya/README.md`. The public Hodir surface (`ulduar.hodir`: `open_archive`, `put_file`, `put_stream`): `hodir/README.md`.
 - Logging: library code logs through loggers under `ulduar.*`, adds no handler and never touches the root
   logger.
 

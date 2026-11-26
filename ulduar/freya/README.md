@@ -3,8 +3,8 @@
 ## Purpose & scope
 
 Freya is the catalog and lineage component; its database is the Archivum (PostgreSQL 18, its own database,
-every object in schema `ulduar`). It holds the schema half (the versioned-SQL ledger, the step that creates
-the Phase 1 schema, the checks that refuse a schema this library cannot serve) and the catalog half: a
+every object in schema `ulduar`). It holds the schema half (the versioned-SQL ledger, the steps that create
+the schema, the checks that refuse a schema this library cannot serve) and the catalog half: a
 project's datasets and artifacts registered through a catalog session, and the ledger-role calls that
 onboard a project, declare and apply history retention and redact a value; and lineage: "derived from"
 edges between artifacts and datasets, with ancestors and descendants queries.
@@ -16,10 +16,11 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 | `__init__.py` | The facade: re-exports the public surface listed under Interfaces & contracts |
 | `ledger.py` | `load_steps`, `install`, `check_schema`, `schema_status`, `library_release`, `open_ledger_connection`, the bootstrap, `LEDGER_LOCK_KEY` |
 | `_records.py` | Private, below the others: the records (`Project`, `NodeRef`, `Dataset`, `Artifact`, `LineageEdge`, `LineageNode`), `qualified` (the one home of the schema name), `Connection`, `insert_with_partition_retry` |
-| `catalog.py` | `ARTIFACT_KINDS`, `open_catalog` and `Catalog` |
+| `catalog.py` | `ARTIFACT_KINDS`, `open_catalog` and `Catalog` (with `transaction`, the hook the other components record through); the argument checks `check_kind` and `check_origin`, which Hodir reuses to validate a put before it stores anything |
 | `lineage.py` | The edge insert and the ancestor and descendant walks, as functions of `(conn, settings, project, …)` that `Catalog` calls with its own |
 | `history.py` | Ledger-role calls: `onboard_project`, `declare_history_retention`, `apply_history_retention`, `redact`; the only code that issues `UPDATE` or `DELETE` against history |
 | `steps/0001_catalog.sql` | Step 1: roles, tables, functions, triggers, partitions, row-level security and grants |
+| `steps/0002_archive.sql` | Step 2 (additive): the archive's tables, the registration trigger, `artifact_is_archived`, the history list widened, the partition functions replaced |
 
 ## How it works
 
@@ -50,7 +51,9 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   The group holds `USAGE` on the schema, `SELECT` and `INSERT` on `dataset`, `artifact`,
   `lineage_edge`, `SELECT` on `project`, `project_member`, `scope`, `artifact_kind`,
   `history_retention_rule`, `schema_ledger`, and `EXECUTE` on `member_projects`, `node_exists`,
-  `is_ledger_role`, `ensure_partitions`; no `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER`.
+  `is_ledger_role`, `ensure_partitions`; step 2 adds `SELECT` and `INSERT` on `archive_registration`,
+  `archive_deletion`, `archive_check`, `archive_finding`, `SELECT` on `archive_retention_rule` and `EXECUTE` on
+  `artifact_is_archived`. No `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER`.
 - `ulduar_recorder` is cluster-wide (roles are shared by every database of a server). A second Archivum on
   the same server finds it already there, so its ledger role must hold `ADMIN OPTION` on it (granted once by a
   superuser) to onboard a project. Because the group holds the same grants in each Archivum, a recording role
@@ -69,13 +72,30 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 | `history_retention_rule`, `history_retention_action`, `redaction` | The retention and redaction records of D40; never age out, never redacted |
 | `schema_ledger` | The ledger table (bootstrap) |
 
+### Schema overview (step 2)
+
+| Object | Notes |
+|---|---|
+| `archive_registration` | An artifact whose object Hodir stored: one row per artifact, with the artifact's own scope and `event_at` and its `retention_class` (NULL: kept for ever). No foreign key to the partitioned `artifact` (making a partition would lock this table); the trigger `check_archive_registration` refuses an artifact that is not in the project with that scope and time (`UL002`, `UnknownRecordError`). Leaves only with its artifact, by retention |
+| `archive_retention_rule` | Retention rules per (project, class), appended by the ledger role; the latest wins. The recording role can only read it |
+| `archive_deletion` | The record of every deletion from the archive: an intent, then its `confirmed` or `cancelled` outcome (one per intent), the cause (`retention`, `incomplete_put`, `purge`), and for a purge the reason. Never ages out, never redacted. `rule_id` is not a foreign key (a rebuild restores deletion records into an Archivum that may lack the rule) |
+| `archive_check`, `archive_finding` | One verification or reconciliation and what it found per object; monthly partitions; age out through history retention |
+| `artifact_is_archived(project, artifact)` | True while the artifact has a registration and no confirmed deletion of its content (project, scope, checksum) was recorded after it; both times are the database's `recorded_at`, never a client's |
+| `history_retention_rule.history` | The CHECK list is widened to `artifact`, `lineage_edge`, `archive_check`, `archive_finding` (a test holds `HISTORIES` equal to it) |
+
+- Step 2 follows step 1's conventions: UUIDv7 ids whose time is `event_at`, `recorded_at` stamped by the database,
+  row-level security forced with `ledger_all` and the member policies (a recording role inserts and selects its own
+  project's rows of the four archive tables), append-only triggers (`DELETE:retention` on the registration and the two
+  check histories, none on the rule and the deletion record) and `refuse_truncate` on all five tables and every
+  partition.
+
 - Every id is a UUIDv7 whose time equals the row's `event_at` (a CHECK). `recorded_at` is the database's time: a
   `BEFORE INSERT` trigger (`stamp_recorded_at`) on every table that has it overwrites whatever the inserting role
   supplies with `clock_timestamp()` (the time of the insert, not the transaction's start). So among declares
   serialised by the retention lock, the one that commits last has the latest `recorded_at` and wins.
 - Row-level security is enabled and forced on every keyed table. The ledger role passes the `ledger_all`
   policy; a recording role sees and inserts only rows of the project it belongs to (`project_member`).
-- Append-only: triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the six history tables unless the ledger
+- Append-only: triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the history tables of step 1 (and step 2's, below) unless the ledger
   role has set `ulduar.maintenance` to a mode that passes that operation on that table: a trigger argument is
   `<operation>:<mode>`, so `DELETE` passes only in `retention` (artifact, lineage edge) and `UPDATE` only in
   `redaction` (artifact, dataset); a mode never allows the other's operation. Truncate is always refused,
@@ -92,15 +112,17 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   only what that call made. `for_time` must lie between 15 years ago and 2 years ahead (else it raises, and
   the library's partition retry surfaces a `UlduarError`), which keeps the year at four digits. Both
   functions pin `TimeZone` to UTC and `DateStyle` to ISO, so the bounds never depend on the caller's session.
-  `drop_empty_partitions` first locks both parent tables (`ACCESS EXCLUSIVE`, which locks every partition
-  too), `lineage_edge` before `artifact`, and `ensure_partitions` makes its partitions in the same order
+  `drop_empty_partitions` first locks the four parent tables (`ACCESS EXCLUSIVE`, which locks every partition
+  too), `lineage_edge`, `artifact`, `archive_check`, `archive_finding`, and `ensure_partitions` makes its partitions in the same order
   (`CREATE ... PARTITION OF` locks the parent). That is the order of the only recorder that holds both: an edge
   insert locks `lineage_edge`, then its trigger reads `artifact`. Creating an `artifact` partition also takes
   `SHARE ROW EXCLUSIVE` on `dataset`, `scope` and `artifact_kind`, through the cloned foreign keys. The lock
-  order is `lineage_edge`, `artifact`, then {`dataset`, `scope`, `artifact_kind`}: every path takes these tables
+  order is `lineage_edge`, `artifact`, `archive_check`, `archive_finding`, then {`dataset`, `scope`, `artifact_kind`}: every path takes these tables
   in that order, or touches only one of them in a transaction (every other recorder path; each count of a
   retention dry run, which runs in a transaction of its own, as each delete does), so none deadlocks with
-  another.
+  another. `archive_registration` is in no such path: a registration insert reads `artifact`, and the partition
+  functions never lock the registration table. Step 2 replaced both functions (`CREATE OR REPLACE`, which keeps
+  their grants) to cover `archive_check` and `archive_finding`.
 
 ### The catalog session
 
@@ -113,6 +135,12 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 - Every `Catalog` call is one transaction with transaction-scoped time limits; a driver error is raised as
   the package's exception, worded `<Operation> <object> failed: <the server's message>`, and a package error
   passes through. A bad argument is a `ValueError` naming it, raised before any SQL.
+- `Catalog.transaction(what, work, *, event_ats=())` is the hook through which Ulduar's other components (Hodir
+  now, Thorim and Algalon later) record on the job's one connection: it runs `work(conn)` in one transaction with
+  the session's time limits and returns its result; a driver error is raised as the package's exception, worded
+  `<what> failed: ...`, and a package error or any other exception from `work` rolls the transaction back and passes
+  through. With *event_ats*, the times of the partitioned rows `work` writes, a missing month is made and `work`
+  runs again, so it must then be safe to run twice.
 - A record id is a UUIDv7 made by the client; its time is the record's `event_at`. `register_artifact`'s
   `record_id` is the idempotency key: the same id with the same content returns the recorded artifact, with
   other content raises `UlduarError`. A new id is made when none is given.
@@ -142,6 +170,10 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   row per node and depth, so a walk costs nodes times depths, not the number of paths; a cycle cannot be
   recorded, and if one got into the table an unbounded walk would end at the statement timeout
   (`ArchivumUnavailable`).
+- An artifact whose object is still archived (`artifact_is_archived`) never ages out: the dry run does not count it
+  and the delete skips it, until a confirmed deletion of its content is recorded. The delete is one statement
+  that also removes the `archive_registration` rows of the artifacts it deletes, and `rows` counts artifacts.
+  `archive_check` and `archive_finding` age out by `event_at`, as lineage edges do.
 - An edge ages out by its own `lineage_edge` retention rule, so a walk may name a node whose record has aged
   out of `artifact`.
 
@@ -157,7 +189,8 @@ ends with the transaction).
   grants it `ulduar_recorder`. A login role belongs to one project: one already in another raises `UlduarError`
   naming role and project and keeps nothing; one that does not exist raises `UnknownRecordError`. Repeating it
   changes nothing.
-- `declare_history_retention` appends a rule for a project and history (`artifact`, `lineage_edge`); the rule
+- `declare_history_retention` appends a rule for a project and history (`artifact`, `lineage_edge`, `archive_check`,
+  `archive_finding`); the rule
   recorded last wins; `keep_days=None` keeps for ever (also the state when no rule exists). Nothing is removed.
   It takes the advisory lock of its (project, history) pair (`history.retention_lock_name`) first.
 - `apply_history_retention(dry_run=True)` takes the latest rule of every project and history that has a
@@ -191,6 +224,7 @@ ends with the transaction).
   - `register_artifact(kind, checksum: bytes, size, *, origin=None, dataset=None, scope=None, record_id=None)
     -> Artifact`: `kind` in `ARTIFACT_KINDS`, `checksum` a 32-byte SHA-256 digest, `size` ≥ 0, `origin` 1 to
     1000 characters (a path or identifier within the source, never an actor), `record_id` a UUIDv7.
+  - `transaction(what, work: Callable[[Connection], R], *, event_ats=()) -> R`: see the catalog session.
   - `get_artifact(artifact_id) -> Artifact` (`UnknownRecordError`); `find_artifacts(*, checksum=None,
     kind=None, dataset=None, scope=None) -> list[Artifact]`, ordered by `event_at, artifact_id`.
   - `namespace` 1 to 200 and `name` 1 to 500 characters; `scope` matches `NAME_PATTERN`.
@@ -205,7 +239,8 @@ ends with the transaction).
   keep_days, event_at)`; `apply_history_retention(config, *, dry_run=True, now=None) -> list[RetentionResult(
   project, history, rule_id, cutoff, rows, dry_run)]`; `redact(config, project, history, record_id, field,
   reason) -> Redaction(redaction_id, project, history, record_id, field, reason, event_at)`.
-- Constants: `ARTIFACT_KINDS` (a test holds it equal to the `artifact_kind` rows); in `history.py`: `HISTORIES`,
+- `Connection` (`psycopg.Connection[TupleRow]`) is exported for the callbacks of `Catalog.transaction`.
+- Constants: `ARTIFACT_KINDS` (a test holds it equal to the `artifact_kind` rows); in `history.py`: `HISTORIES` (a test holds it equal to the schema's CHECK list),
   `REDACTABLE_FIELDS`, `REDACTION_REASONS`, `MAINTENANCE_SETTING`.
 - Exceptions: `ConfigurationError`, `SchemaVersionError`, `LedgerError`, `ArchivumUnavailable` and the other
   members of `ulduar.errors`.
