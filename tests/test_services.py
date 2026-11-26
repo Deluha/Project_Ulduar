@@ -19,8 +19,12 @@ from dev_tools.services import (
     POSTGRES_MAJOR,
     REQUIRE_SERVICES_VARIABLE,
     S3_ACCESS_KEY_VARIABLE,
+    S3_DELETER_ACCESS_KEY_VARIABLE,
+    S3_DELETER_SECRET_KEY_VARIABLE,
     S3_ENDPOINT_VARIABLE,
     S3_SECRET_KEY_VARIABLE,
+    S3_WRITER_ACCESS_KEY_VARIABLE,
+    S3_WRITER_SECRET_KEY_VARIABLE,
 )
 from tests.conftest import (
     missing_service_run_problem,
@@ -185,8 +189,33 @@ def test_the_dev_container_uses_the_same_images_and_credentials() -> None:
         assert f"image: {service.image}" in compose, service.name
         for key, value in service.environment.items():
             assert f"{key}: {value}" in compose, key
-    for key in (S3_ACCESS_KEY_VARIABLE, S3_SECRET_KEY_VARIABLE):
+    for key in (
+        S3_ACCESS_KEY_VARIABLE,
+        S3_SECRET_KEY_VARIABLE,
+        S3_WRITER_ACCESS_KEY_VARIABLE,
+        S3_WRITER_SECRET_KEY_VARIABLE,
+        S3_DELETER_ACCESS_KEY_VARIABLE,
+        S3_DELETER_SECRET_KEY_VARIABLE,
+    ):
         assert f"{key}: {services.default_environment()[key]}" in compose, key
+
+
+def test_the_dev_container_provisions_the_same_users_as_start() -> None:
+    compose = (REPO_ROOT / ".devcontainer/docker-compose.yml").read_text(encoding="utf-8")
+    for line in services.provisioning_script().splitlines():
+        assert f"        {line}\n" in compose, line
+
+
+def test_the_writer_cannot_delete_and_the_deleter_can() -> None:
+    deletions = {"s3:DeleteObject", "s3:DeleteObjectVersion"}
+    assert not deletions & set(services.WRITER_ACTIONS)
+    assert deletions <= set(services.DELETER_ACTIONS)
+    assert set(services.WRITER_ACTIONS) <= set(services.DELETER_ACTIONS)
+    assert all(arn.startswith("arn:aws:s3:::ulduar-test-") for arn in services.TEST_BUCKET_ARNS)
+    assert services.OBJECT_STORE_WRITER_ACCESS_KEY not in {
+        services.OBJECT_STORE_ACCESS_KEY,
+        services.OBJECT_STORE_DELETER_ACCESS_KEY,
+    }
 
 
 def test_the_s3_client_ignores_environment_proxies(s3_client: Any) -> None:

@@ -4,17 +4,19 @@
 
 The importable package. It is generic: nothing here names a consumer or assumes a consumer's schema,
 folders or jobs (hard rule 1). Phase 1 adds the configuration file, the connection to the Archivum, the
-public exceptions, the record identifiers and the first component, Freya (`freya/README.md`).
+public exceptions, the record identifiers and the first component, Freya (`freya/README.md`). Phase 2 adds the
+`[archive]` configuration section and the foundation of Hodir, the cold archive (`hodir/README.md`).
 
 ## Files & entry points
 
 | File | Holds |
 |---|---|
 | `__init__.py` | `__version__`, read from the installed distribution's metadata |
-| `config.py` | `load_config` and the frozen `Config`, `ProjectSettings`, `ArchivumSettings`; `NAME_PATTERN`, the one definition of a project name or scope |
+| `config.py` | `load_config` and the frozen `Config`, `ProjectSettings`, `ArchivumSettings`, `ArchiveSettings`, `CredentialSettings`; `NAME_PATTERN`, the one definition of a project name or scope |
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation (`translate`, `translated`, `translated_transaction`) |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
+| `hodir/` | Hodir's facade (no public calls yet) and, private, the storage interface with its directory and S3 backends (`hodir/README.md`) |
 | `freya/` | Freya's facade, schema ledger, SQL steps, catalog session, lineage and the ledger-role history calls (`freya/README.md`) |
 
 ## How it works
@@ -23,7 +25,8 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   integer 1), `[project]` (`name`, optional `scope`, both matching `NAME_PATTERN`) and `[archivum]`
   (`dsn_env`, optional `ledger_dsn_env`, and the timeouts below). An unknown key at any level, a wrong
   type, an out-of-range timeout, a missing or unreadable file or a TOML syntax error raises
-  `ConfigurationError` naming the dotted key or the path.
+  `ConfigurationError` naming the dotted key or the path. The optional `[archive]` table (below) configures
+  Hodir; a file without it stays valid.
 - Credentials never appear in the file: `dsn_env` and `ledger_dsn_env` name environment variables that hold
   PostgreSQL connection strings. `dsn_env` is the recording role's; `ledger_dsn_env` is the ledger role's,
   used only to install and upgrade the schema, onboard a project and declare, apply and redact history.
@@ -38,24 +41,49 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   a block and `_db.translated_transaction(conn, settings, what)` for a transaction.
 - Time limits, in seconds (default, range): connect 10 (1–60), statement 30 (1–600), lock 5 (1–60), total
   budget per call 60 (1–3600). A limit that is hit raises `ArchivumUnavailable`.
+- `[archive]` (optional; `ArchiveSettings`), keys by backend. Defaults and ranges in parentheses.
+  - Both backends: `backend` (required: `"s3"` or `"directory"`); `prefix` ("" or `/`-joined segments each
+    matching `NAME_PATTERN`; default `ulduar`); `spool_dir` (an absolute path; default the system temporary
+    directory); `spool_limit_gib` (100; 1–100000); `incomplete_put_grace_hours` (168; 24–8760);
+    `max_deletions_per_run` (100; 1–1000000). The last three and `spool_dir` are validated now and used by
+    later Phase 2 commits.
+  - `directory` only: `path` (required, absolute; it must exist when the store opens). The s3-only keys
+    below are refused.
+  - `s3` only: `bucket` (required; S3 bucket naming, `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`); `region`
+    (`^[a-z0-9-]{1,32}$`); `endpoint_url_env` (the variable holding the endpoint URL: `https://`, or `http://`
+    to a loopback host); `proxy_env` (the variable holding a proxy URL; absent means no proxy, the environment's
+    proxies are never used); `[archive.writer]` and `[archive.deleter]`, each with `access_key_env` and
+    `secret_key_env` (required) and `session_token_env` (optional), all names of environment variables. No
+    writer means the client's standard credential chain; the deleter is needed only by calls that delete, and
+    must name a different `access_key_env` than the writer. `path` is refused.
+  - Integers share one bounded reader, so a message ends `between <low> and <high> <unit>` (seconds, hours,
+    GiB; none for the deletion count).
 - Record ids are UUIDv7 made by the client; a record's `event_at` is the time inside its id.
 
 ## Interfaces & contracts
 
 - `ulduar.__version__`: the version from `pyproject.toml`; `0+unknown` in a checkout that was never
   installed.
-- `ulduar.config`: `load_config(path="ulduar.toml") -> Config`, `Config(project, archivum, path)`,
+- `ulduar.config`: `load_config(path="ulduar.toml") -> Config`, `Config(project, archivum, path, archive=None)`,
   `ProjectSettings(name, scope="default")`, `ArchivumSettings(dsn_env, ledger_dsn_env=None, connect_timeout_s=10,
-  statement_timeout_s=30, lock_timeout_s=5, call_budget_s=60)`, `NAME_PATTERN`, `CONFIG_VERSION`,
+  statement_timeout_s=30, lock_timeout_s=5, call_budget_s=60)`, `ArchiveSettings(backend, path=None, bucket=None,
+  prefix="ulduar", region=None, endpoint_url_env=None, proxy_env=None, spool_dir=None, spool_limit_gib=100,
+  incomplete_put_grace_hours=168, max_deletions_per_run=100, writer=None, deleter=None)`,
+  `CredentialSettings(access_key_env, secret_key_env, session_token_env=None)`, `NAME_PATTERN`, `CONFIG_VERSION`,
   `check_name(value, what) -> str` (the name check; raises `ValueError`).
 - `ulduar.errors`: `UlduarError`; `ConfigurationError`; `ArchivumUnavailable` (no connection, a timeout, the
   call budget, a lost connection, a deadlock (40P01) or a serialization failure (40001)); `SchemaVersionError`
   (not installed, schema too new or too old, unsupported server); `LedgerError` (changed step, breaking step without
   its flag, ledger lock); `UnknownRecordError`; `LineageCycleError`; `IsolationError` (refused by row-level security
-  or privileges). A message names the object (project, variable, step, host) and never a connection string, a
+  or privileges); `ArchiveUnavailable` (the archive store is unreachable, timed out or refused the credential);
+  `IntegrityError` (an archived object does not match its checksum or size, or is missing or unreadable);
+  `ArchiveFormatError` (the store's format marker is missing, foreign or of an unknown version; raised by later
+  Phase 2 commits). A message names the object (project, variable, step, host) and never a connection string, a
   password or a credential's value.
 - One runtime dependency: `psycopg>=3.2,<4` (needs a system libpq 16 or newer; the extra
-  `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision.
+  `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision. One optional
+  extra beside `binary`: `project-ulduar[s3]` (`boto3>=1.36,<2`), the S3 backend's client; without it
+  `open_store` raises `ConfigurationError` for an s3 archive.
 - The public Freya surface (`ulduar.freya`: `open_catalog` with its register, find, lineage, ancestors and
   descendants calls, the onboarding, retention and redaction calls, and their records): `freya/README.md`.
 - Logging: library code logs through loggers under `ulduar.*`, adds no handler and never touches the root

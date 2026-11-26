@@ -31,6 +31,13 @@ library only, so each script runs on a bare Python. Not part of the distribution
   here" check compares the whole reference; a new image release is a deliberate edit of the digest here and
   in `.devcontainer/docker-compose.yml` (`tests/test_services.py` checks they agree). Read a digest with
   `docker image inspect <image> --format '{{index .RepoDigests 0}}'`.
+- After MinIO answers, `start` provisions the archive's two test users with `mc` inside the container
+  (`provisioning_script()`, `docker exec … sh -c`): `ulduar-writer` (put, get, list, multipart incl. abort, bucket
+  versioning and versions listing: no delete) and `ulduar-deleter` (the writer's plus delete of objects and
+  versions), both limited to buckets named `ulduar-test-*`. It is idempotent (policies and users are re-created,
+  an attached policy tolerated) and a failure makes `start` exit 1. The dev container's one-shot service
+  `s3-provision` in `.devcontainer/docker-compose.yml` runs the same script (`tests/test_services.py` checks
+  they agree). `env` also prints the four variables of these users.
 
 ## Interfaces & contracts
 

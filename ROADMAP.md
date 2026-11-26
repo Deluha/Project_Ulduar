@@ -6,8 +6,8 @@ decisions are dated.
 
 Approved by the owner on 2026-11-22: the concept, the form, the process timing and every scope rule
 below (D1–D14). What is still marked *proposed* inside a phase is that phase's starting position,
-presented as a concrete proposal and confirmed at its sign-off. Phase 0 is merged; Phase 1 is in
-review.
+presented as a concrete proposal and confirmed at its sign-off. Phases 0 and 1 are merged; Phase 2 is in
+progress.
 
 Decided by the owner on 2026-11-23, in the planning session for the first personal-data consumers and in
 the review of the pull request that followed: decisions D15–D26 and the personal-data release they add,
@@ -239,7 +239,7 @@ D27–D32 and D35–D40 shape the Archivum schema and the object layout from the
 | Phase | Release | Status | Pull request |
 |---|---|---|---|
 | 0 — Development process | v0.1 | Merged | |
-| 1 — Freya | v0.1 | In review | |
+| 1 — Freya | v0.1 | Merged | |
 | 2 — Hodir | v0.1 | Not started | |
 | 3 — Mimiron | v0.1 | Not started | |
 | 4 — Thorim | v0.1 | Not started | |
@@ -465,6 +465,36 @@ concurrent put
 (*proposed*: one injected failure per step of a put, and two connections for put against put and put
 against deletion — whether a failing wrapper over a real backend is allowed under hard rule 9 is the
 owner's call). Hodir has no client-side encryption (D34).
+
+Sign-off decisions (owner, 2026-11-26: H1–H22 confirmed as proposed, after a probe of the pinned object store
+showed that conditional `PutObject` and `CompleteMultipartUpload` are honoured, that a SHA-256 checksum header is
+enforced, that `CopyObject` ignores `If-None-Match` and overwrites, and that a bucket-policy condition on
+`s3:if-none-match` is refused; H23–H27 confirmed the same day):
+
+| # | Item | Decision |
+|---|---|---|
+| H1–H2 | Key layout, checksum | `<prefix>/<project>/<scope>/_objects/sha256/<h[0:2]>/<h>`; SHA-256 of the stored bytes, named in the key. Fixed segments start with `_`, which no scope segment can (`NAME_PATTERN`), so v0.2 adds scope levels between `<project>/` and `/_objects` and no v0.1 key moves (D27). |
+| H3 | Object manifest | One JSON file per registration at `<prefix>/<project>/<scope>/_manifests/<yyyy>/<mm>/<artifact_id>.json`: `format` 1, `artifact_id`, `event_at`, `project`, `scope`, `kind`, `checksum`, `size`, `dataset_id`, `retention_class`. No origin, no dataset name or namespace (F18). A rebuild re-registers under the same `artifact_id`. |
+| H4 | Records in the store | Deletion intents and confirmations, purges, incomplete-put removals, history-retention actions and redactions, at `<prefix>/<project>/_records/<yyyy>/<mm>/<record_id>.json`, written once per record id by every Hodir maintenance call; a rebuild re-applies those the Archivum lacks. |
+| H5 | Format version | A write-once marker `<prefix>/ulduar-archive.json` (`{"format": "ulduar-archive", "version": 1}`), checked on every open (`ArchiveFormatError`), and a write-once plain-text `<prefix>/LAYOUT.txt`. |
+| H6 | Known-size put | Hashed first, then written straight to its final key with `If-None-Match: *` and the SHA-256 checksum header; a 412 means the object exists and is relied on. Order: object, manifest, registration (D31). |
+| H7 | Stream put (D36) | Spooled to a local file while hashing, up to `spool_limit_gib`, then stored as H6 once `commit()` is called; leaving without it deletes the spool and stores nothing. No temporary object in the store and no copy. |
+| H8 | Large objects | A single PUT below 64 MiB; above, a multipart upload with a SHA-256 per part and a conditional complete; part size 64 MiB or `size / 10 000` rounded up to a MiB; largest object 5 TiB. A failed upload is aborted; reconcile aborts unfinished uploads older than the grace period. |
+| H9 | Get | To a file: a partial file beside the destination, verified, synced, renamed; an existing destination is refused. To a stream: `IntegrityError` at the end on a mismatch. |
+| H10 | Verify | Re-reads every byte and compares SHA-256 itself; full, or `sample=N` — the N objects whose last passing check is oldest, never-checked first. The rotation period is an Algalon expectation (Phase 5). A storage class that cannot be read at once is a finding. |
+| H11 | Reconcile, incomplete puts (D31, D38) | Reconcile lists objects without an entry, registered entries without an object (unless a confirmed deletion explains it) and unfinished uploads, ignoring anything younger than the grace period. `clean_incomplete(dry_run=True)` (deleter credential) adopts an orphan with a manifest and removes, with a record, one without. Grace period: 7 days by default, at least 1 day. |
+| H12–H13 | Retention classes | No class keeps for a limited time unless declared. A put names its class, fixed at archive time; the keep period is the latest rule recorded in the Archivum, declared by the ledger role. An object is deletable only when every registration of it has expired under its own class; a class without a rule keeps for ever. |
+| H14 | Safeguards | `keep_newest` defaults to 1 (the newest copy of a dataset is never deleted by age alone); `max_deletions_per_run` defaults to 100 unless a flag is given; a shortening rule needs `confirm_shortening=True`, recorded in the rule; apply is a dry run by default. |
+| H15 | Put against deletion (D37) | Both take a transaction-scoped advisory lock on (project, scope, checksum). A put, under it, checks the object exists, then writes its registration (if the object is gone it uploads again). A deletion commits its intent, then under the lock records `cancelled` if a registration arrived after the intent, or deletes every version and the content's manifests and records `confirmed` once no version is left; under object lock the intent stays open. |
+| H16 | Purge (D39) | `purge(config, scope, checksum, reason)` under the deleter credential, reasons as redaction's (`personal_data`, `secret`, `recorded_by_mistake`); removes the object, its versions and its manifests; records identifier, checksum, size and reason; catalog entries are untouched. |
+| H17 | Tables | Step 2 (`0002_archive.sql`, additive): `archive_registration`, `archive_retention_rule`, `archive_deletion` (never ages out, never redacted), `archive_check` and `archive_finding` (monthly partitions); row-level security, append-only triggers and grants as step 1. |
+| H18 | Bucket and credentials (D35) | Writer: put, get, list and multipart actions including abort, no delete. Deleter: a separate credential that deletes objects and versions. Overwrites refused by the store through a conditional-write policy or versioning (MinIO: versioning only); object lock recommended; immediate-retrieval classes only; no lifecycle rule may expire or move an object. Directory: files 0444, linked into place, no symbolic link followed, regular files only — the weaker guarantee. |
+| H19 | Public surface | The `ulduar.hodir` facade: `open_archive(config)` with `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`; `declare_retention`, `apply_retention`, `clean_incomplete`, `purge`. Exceptions `ArchiveUnavailable`, `IntegrityError`, `ArchiveFormatError`. A put raises on failure (D33). The storage interface stays private until Phase 3. |
+| H20 | Configuration | An optional `[archive]` table: `backend` (`s3` or `directory`), `path`, `bucket`, `prefix`, `region`, `endpoint_url_env`, `proxy_env`, `spool_dir`, `spool_limit_gib` (100), `incomplete_put_grace_hours` (168), `max_deletions_per_run` (100), and `[archive.writer]` / `[archive.deleter]` naming environment variables only. |
+| H21 | Runtime dependency | `boto3>=1.36,<2` as the extra `project-ulduar[s3]`; the directory backend needs none. |
+| H22 | Tests | The pinned MinIO stays; a second server stays Later. The test services provision a writer user without delete and a deleter user. A wrapper in `tests/` that passes every call to the real backend and raises at a chosen step is allowed under hard rule 9. Put against put and put against deletion run on two connections. |
+| H23 | Freya's component hook | `Catalog.transaction(what)` (public): one transaction on the session's connection with the time limits, error translation and partition retry; Hodir registers the artifact through `register_artifact`, then writes its registration under the address lock in it. Thorim and Algalon reuse it (F26 holds: one connection per job). |
+| H24–H27 | Phase 1 knock-ons | `freya.redact` takes an optional `record_id`; an artifact whose object is still archived does not age out of history; step 2 replaces `ensure_partitions` and `drop_empty_partitions` to cover the two new partitioned tables, and both join `HISTORIES`; the dev container provisions the same writer and deleter users. |
 
 ### Phase 3 — Mimiron
 

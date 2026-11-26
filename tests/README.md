@@ -10,9 +10,10 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 
 | File | Covers | Services |
 |---|---|---|
-| `conftest.py` | The database fixtures `db_dsn`, `db_conn` and `archivum`, the object-store fixtures `s3_settings`, `s3_client` and `s3_bucket`, the local-only guards, the `db` and `s3` markers, the required-run check; the helpers the Freya tests share: `CHECKSUM`, `digest`, `ms_ago`, `onboarded`, `recorder_of`, `partition_exists`, `failure`, `count`, `old_artifacts`, `PARTITION_LOCK_KEY` and `lineage_lock_name` (the advisory locks of step 1), and `wait_until_blocked` (returns once sessions queue for a lock, so a race test acts deterministically) | — |
-| `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1 and recreated on another image; the S3 client ignoring proxies; CI starting them through `dev_tools/services.py`; the dev container naming the same images and credentials; the `services.py` command line; the fixtures' guards | both |
-| `test_config.py` | `ulduar.config`: defaults, every unknown-key level, the version key, names, bounds, file errors | no |
+| `conftest.py` | The database fixtures `db_dsn`, `db_conn` and `archivum`, the object-store fixtures `s3_settings`, `s3_client`, `s3_bucket`, the archive fixtures `archive_bucket`, `versioned_archive_bucket`, `archive_settings_s3`, `archive_settings_s3_versioned` and `archive_settings_dir` (and the helpers `temporary_bucket`, `s3_archive_settings`), the local-only guards, the `db` and `s3` markers, the required-run check; the helpers the Freya tests share: `CHECKSUM`, `digest`, `ms_ago`, `onboarded`, `recorder_of`, `partition_exists`, `failure`, `count`, `old_artifacts`, `PARTITION_LOCK_KEY` and `lineage_lock_name` (the advisory locks of step 1), and `wait_until_blocked` (returns once sessions queue for a lock, so a race test acts deterministically) | — |
+| `test_services.py` | The services themselves: PostgreSQL major version 18, rollback of uncommitted work, an object round trip, a fresh bucket per test; the containers bound to 127.0.0.1 and recreated on another image; the S3 client ignoring proxies; CI starting them through `dev_tools/services.py`; the dev container naming the same images, credentials and provisioning script; the writer and deleter policies (the writer cannot delete); the `services.py` command line; the fixtures' guards | both |
+| `test_config.py` | `ulduar.config`: defaults, every unknown-key level, the version key, names, bounds, file errors; the `[archive]` section: both backends' defaults and full forms, keys refused on the wrong backend, bucket, prefix, region, variable-name and absolute-path rules, the writer and deleter tables, the bounds and their messages | no |
+| `test_hodir_store.py` | Hodir's private storage interface, over a real directory, an unversioned bucket and a versioned bucket: put never overwrites (also with 8 writers at once), checksum and size mismatches store nothing, multipart (threshold lowered to 5 MiB) incl. a lost race and a mismatch, head, read, sorted recursive prefix-bounded list, unfinished uploads, the store prefix, the writing store without delete methods, deletion of every version and delete marker, the writer credential refused a delete by MinIO; the directory's symbolic-link and special-file refusals, modes and OS errors; key validation before any I/O; the s3 transport guard, proxies, unset variables, the missing extra, and that no secret or access key reaches an error message or an `ulduar` log record | both |
 | `test_ids.py` | `ulduar._ids`: UUIDv7 bits, the millisecond round trip, ordering, the server's reading of the same id | db |
 | `test_db.py` | `ulduar._db`: the transport guard (and the environment libpq falls back to), the DSN variable, error wrapping, the opened connection (pinned to READ COMMITTED), the statement, lock and budget limits, error translation by SQLSTATE | db |
 | `test_freya_ledger.py` | The schema ledger: every step applied to an empty database, no step applied twice, checksums, breaking steps, minimum library, concurrent installs, the ledger lock, step headers; what step 1 builds (roles, isolation, append-only, partitions: concurrent callers, the time window, UTC bounds under another session time zone, truncate refused on partitions) | db |
@@ -38,10 +39,21 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 - `s3_bucket` creates a bucket with a fresh `ulduar-test-` name and removes it, with its objects, when
   the test ends. `s3_client` reads its endpoint and keys from the settings only, never from an AWS
   profile or environment variable.
+- `archive_bucket` and `versioned_archive_bucket` make a fresh `ulduar-test-` bucket (the second with versioning
+  enabled) and remove it with every object version, delete marker and unfinished multipart upload.
+  `archive_settings_s3` and `archive_settings_s3_versioned` return an `ArchiveSettings` for such a bucket that
+  names the test variables below for the endpoint, the writer and the deleter and sets them (through
+  `monkeypatch`) to the guarded values, so a test never names a credential; `archive_settings_dir` returns a
+  directory archive under `tmp_path`. Archive tests reach a store only through `open_store(settings)`.
 - Every test that takes a database fixture is marked `db`, every test that takes an object-store fixture
-  `s3`, automatically.
+  `s3`, automatically. A test that carries an explicit `s3` or `db` marker (a parameter of
+  `test_hodir_store.py`'s backends, where only the bucket cases are marked) counts towards the required-services
+  switch the same way.
 - The settings come from `ULDUAR_TEST_DSN` and `ULDUAR_TEST_S3_ENDPOINT`, `ULDUAR_TEST_S3_ACCESS_KEY`,
-  `ULDUAR_TEST_S3_SECRET_KEY` (names and defaults: `dev_tools/services.py`). Every database `host` and
+  `ULDUAR_TEST_S3_SECRET_KEY`, and the archive's two credentials `ULDUAR_TEST_S3_WRITER_ACCESS_KEY`,
+  `ULDUAR_TEST_S3_WRITER_SECRET_KEY` (a user that cannot delete), `ULDUAR_TEST_S3_DELETER_ACCESS_KEY`,
+  `ULDUAR_TEST_S3_DELETER_SECRET_KEY` (names and defaults: `dev_tools/services.py`); an object-store test
+  skips or fails, per the table below, when any of the seven is unset. Every database `host` and
   `hostaddr` entry, as libpq reads them, must be `localhost`, `127.0.0.1` or `::1`; a host list or a
   `host=` / `hostaddr=` parameter naming any other host, a service entry or a missing host fails the
   test, and so does a set `PGHOSTADDR`, `PGSERVICE` or `PGSERVICEFILE`. The object-store endpoint must

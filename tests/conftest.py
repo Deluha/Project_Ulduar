@@ -32,12 +32,16 @@ from dev_tools.services import (
     DSN_VARIABLE,
     REQUIRE_SERVICES_VARIABLE,
     S3_ACCESS_KEY_VARIABLE,
+    S3_DELETER_ACCESS_KEY_VARIABLE,
+    S3_DELETER_SECRET_KEY_VARIABLE,
     S3_ENDPOINT_VARIABLE,
     S3_SECRET_KEY_VARIABLE,
+    S3_WRITER_ACCESS_KEY_VARIABLE,
+    S3_WRITER_SECRET_KEY_VARIABLE,
 )
 from ulduar import _db, _ids
+from ulduar.config import ArchiveSettings, CredentialSettings, load_config
 from ulduar.config import Config as UlduarConfig
-from ulduar.config import load_config
 from ulduar.freya import install, onboard_project, open_catalog
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -48,6 +52,15 @@ SERVICE_LABELS = {"db": "database", "s3": "object-store"}
 # it names a host, so any of them can redirect a local-looking connection string.
 REDIRECTING_VARIABLES = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 S3_SCHEMES = ("http", "https")
+S3_VARIABLES = (
+    S3_ENDPOINT_VARIABLE,
+    S3_ACCESS_KEY_VARIABLE,
+    S3_SECRET_KEY_VARIABLE,
+    S3_WRITER_ACCESS_KEY_VARIABLE,
+    S3_WRITER_SECRET_KEY_VARIABLE,
+    S3_DELETER_ACCESS_KEY_VARIABLE,
+    S3_DELETER_SECRET_KEY_VARIABLE,
+)
 TEST_BUCKET_PREFIX = "ulduar-test-"
 # The shared group role of step 1; the throwaway ledger role must be able to grant it to project roles.
 RECORDER_GROUP = "ulduar_recorder"
@@ -67,9 +80,15 @@ def lineage_lock_name(project_id: uuid.UUID) -> str:
 
 
 class S3Settings(NamedTuple):
+    """The object store's endpoint and the three credentials: the root user's, the archive's writer and deleter."""
+
     endpoint: str
     access_key: str
     secret_key: str
+    writer_access_key: str
+    writer_secret_key: str
+    deleter_access_key: str
+    deleter_secret_key: str
 
 
 def _required(environ: dict[str, str]) -> bool:
@@ -81,7 +100,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         names = set(getattr(item, "fixturenames", ()))
         for marker, fixtures in SERVICE_FIXTURES.items():
-            if fixtures & names:
+            # An explicit marker counts too: a test over every storage backend marks only its object-store cases.
+            if fixtures & names or item.get_closest_marker(marker):
                 item.add_marker(getattr(pytest.mark, marker))
                 _service_test_ids[marker].add(item.nodeid)
 
@@ -128,11 +148,10 @@ def resolve_s3(environ: dict[str, str]) -> tuple[S3Settings | None, str | None]:
     Same contract as resolve_dsn: missing settings skip or fail per the requirement, an
     endpoint off this machine always fails.
     """
-    names = (S3_ENDPOINT_VARIABLE, S3_ACCESS_KEY_VARIABLE, S3_SECRET_KEY_VARIABLE)
-    missing = [name for name in names if not environ.get(name)]
+    missing = [name for name in S3_VARIABLES if not environ.get(name)]
     if missing:
         return None, f"{', '.join(missing)} not set — object-store tests did not run (tests/README.md)"
-    settings = S3Settings(*(environ[name] for name in names))
+    settings = S3Settings(*(environ[name] for name in S3_VARIABLES))
     target = non_local_endpoint(settings.endpoint)
     if target:
         return settings, f"{S3_ENDPOINT_VARIABLE} points at {target} — tests connect to this machine only"
@@ -429,15 +448,83 @@ def s3_client(s3_settings: S3Settings) -> Any:
     )
 
 
+@contextmanager
+def temporary_bucket(client: Any, *, versioned: bool = False) -> Iterator[str]:
+    """A fresh, empty bucket, removed on exit with every version, delete marker and unfinished upload."""
+    name = TEST_BUCKET_PREFIX + uuid.uuid4().hex[:12]
+    client.create_bucket(Bucket=name)
+    try:
+        if versioned:
+            client.put_bucket_versioning(Bucket=name, VersioningConfiguration={"Status": "Enabled"})
+        yield name
+    finally:
+        for page in client.get_paginator("list_object_versions").paginate(Bucket=name):
+            for item in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]:
+                client.delete_object(Bucket=name, Key=item["Key"], VersionId=item["VersionId"])
+        for page in client.get_paginator("list_multipart_uploads").paginate(Bucket=name):
+            for upload in page.get("Uploads", []):
+                client.abort_multipart_upload(Bucket=name, Key=upload["Key"], UploadId=upload["UploadId"])
+        client.delete_bucket(Bucket=name)
+
+
 @pytest.fixture
 def s3_bucket(s3_client: Any) -> Iterator[str]:
     """A fresh, empty bucket on the local object store, removed with its objects when the test ends."""
-    name = TEST_BUCKET_PREFIX + uuid.uuid4().hex[:12]
-    s3_client.create_bucket(Bucket=name)
-    try:
+    with temporary_bucket(s3_client) as name:
         yield name
-    finally:
-        listed = s3_client.list_objects_v2(Bucket=name).get("Contents", [])
-        for item in listed:
-            s3_client.delete_object(Bucket=name, Key=item["Key"])
-        s3_client.delete_bucket(Bucket=name)
+
+
+@pytest.fixture
+def archive_bucket(s3_client: Any) -> Iterator[str]:
+    """A fresh, empty, unversioned bucket for an archive test."""
+    with temporary_bucket(s3_client) as name:
+        yield name
+
+
+@pytest.fixture
+def versioned_archive_bucket(s3_client: Any) -> Iterator[str]:
+    """A fresh, empty bucket with versioning enabled; teardown removes every version and delete marker."""
+    with temporary_bucket(s3_client, versioned=True) as name:
+        yield name
+
+
+def s3_archive_settings(bucket: str, settings: S3Settings, monkeypatch: pytest.MonkeyPatch) -> ArchiveSettings:
+    """`ArchiveSettings` for *bucket* on the local object store, naming the test variables and setting them.
+
+    The variables are set to the guarded values, so the library reads them as it would in a consumer's environment.
+    """
+    values = zip(S3_VARIABLES, settings, strict=True)
+    for variable, value in values:
+        monkeypatch.setenv(variable, value)
+    return ArchiveSettings(
+        backend="s3",
+        bucket=bucket,
+        region="us-east-1",
+        endpoint_url_env=S3_ENDPOINT_VARIABLE,
+        writer=CredentialSettings(S3_WRITER_ACCESS_KEY_VARIABLE, S3_WRITER_SECRET_KEY_VARIABLE),
+        deleter=CredentialSettings(S3_DELETER_ACCESS_KEY_VARIABLE, S3_DELETER_SECRET_KEY_VARIABLE),
+    )
+
+
+@pytest.fixture
+def archive_settings_s3(
+    archive_bucket: str, s3_settings: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> ArchiveSettings:
+    """Settings of an s3 archive in a fresh unversioned bucket, with the writer and deleter test credentials."""
+    return s3_archive_settings(archive_bucket, s3_settings, monkeypatch)
+
+
+@pytest.fixture
+def archive_settings_s3_versioned(
+    versioned_archive_bucket: str, s3_settings: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> ArchiveSettings:
+    """Settings of an s3 archive in a fresh versioned bucket."""
+    return s3_archive_settings(versioned_archive_bucket, s3_settings, monkeypatch)
+
+
+@pytest.fixture
+def archive_settings_dir(tmp_path: Path) -> ArchiveSettings:
+    """Settings of a directory archive in a fresh directory."""
+    root = tmp_path / "archive"
+    root.mkdir()
+    return ArchiveSettings(backend="directory", path=root)
