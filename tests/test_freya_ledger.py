@@ -8,12 +8,13 @@ yet: step 1 is the first step and no release has shipped one.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import logging
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
@@ -22,7 +23,7 @@ import psycopg
 import pytest
 from psycopg.rows import TupleRow
 
-from tests.conftest import Archivum
+from tests.conftest import PARTITION_LOCK_KEY, Archivum, count, wait_until_blocked
 from ulduar import _db
 from ulduar._ids import uuid7, uuid7_time
 from ulduar.config import Config
@@ -32,12 +33,14 @@ from ulduar.errors import (
     LedgerError,
     LineageCycleError,
     SchemaVersionError,
+    UlduarError,
     UnknownRecordError,
 )
 from ulduar.freya.ledger import (
     LEDGER_LOCK_KEY,
     SchemaStatus,
     Step,
+    _install,
     check_schema,
     install,
     library_release,
@@ -227,13 +230,13 @@ def test_a_pending_breaking_step_is_refused_without_the_flag_and_applied_with_it
 ) -> None:
     config = archivum.config(tmp_path)
     steps = synthetic_steps(tmp_path / "steps", ("0002_extra.sql", BREAKING_TWO))
-    install(config, steps=steps[:1])
+    _install(config, steps[:1], allow_breaking=False)
     with pytest.raises(LedgerError, match="breaking"):
-        install(config, steps=steps)
+        _install(config, steps, allow_breaking=False)
     assert [r[0] for r in ledger_rows(archivum)] == [1]
     with archivum.superuser() as su:
         assert su.execute("SELECT to_regclass('ulduar.synthetic_two')").fetchone() == (None,)
-    status = install(config, allow_breaking=True, steps=steps)
+    status = _install(config, steps, allow_breaking=True)
     assert (status.applied_step, status.pending) == (2, ())
     assert [r[0] for r in ledger_rows(archivum)] == [1, 2]
 
@@ -241,21 +244,21 @@ def test_a_pending_breaking_step_is_refused_without_the_flag_and_applied_with_it
 def test_a_refused_breaking_step_leaves_a_fresh_database_untouched(archivum: Archivum, tmp_path: Path) -> None:
     steps = synthetic_steps(tmp_path / "steps", ("0002_extra.sql", BREAKING_TWO))
     with pytest.raises(LedgerError, match="nothing was applied"):
-        install(archivum.config(tmp_path), steps=steps)
+        _install(archivum.config(tmp_path), steps, allow_breaking=False)
     with archivum.superuser() as su:
         assert su.execute("SELECT to_regnamespace('ulduar')").fetchone() == (None,)
 
 
 def test_an_additive_step_is_applied_without_the_flag(archivum: Archivum, tmp_path: Path) -> None:
     steps = synthetic_steps(tmp_path / "steps", ("0002_extra.sql", ADDITIVE_TWO))
-    assert install(archivum.config(tmp_path), steps=steps).applied_step == 2
+    assert _install(archivum.config(tmp_path), steps, allow_breaking=False).applied_step == 2
 
 
 def test_a_failing_step_rolls_the_whole_install_back(archivum: Archivum, tmp_path: Path) -> None:
     bad = "-- ulduar-kind: additive\n-- ulduar-min-library: 0.1.0\nCREATE TABLE ulduar.half (x integer);\nSELECT 1/0;\n"
     steps = synthetic_steps(tmp_path / "steps", ("0002_bad.sql", bad))
     with pytest.raises(Exception, match="division by zero") as caught:
-        install(archivum.config(tmp_path), steps=steps)
+        _install(archivum.config(tmp_path), steps, allow_breaking=False)
     assert type(caught.value).__module__ == "ulduar.errors"
     with archivum.superuser() as su:
         assert su.execute("SELECT to_regnamespace('ulduar')").fetchone() == (None,)
@@ -346,7 +349,7 @@ def test_known_steps_the_database_lacks_are_refused_at_check_and_listed_by_statu
 ) -> None:
     config = archivum.config(tmp_path)
     steps = synthetic_steps(tmp_path / "steps", ("0002_extra.sql", ADDITIVE_TWO))
-    install(config, steps=steps[:1])
+    _install(config, steps[:1], allow_breaking=False)
     with (
         ledger_connection(config) as conn,
         pytest.raises(SchemaVersionError, match="at step 1.*needs step 2.*freya.install"),
@@ -494,3 +497,112 @@ def test_only_the_ledger_role_may_run_partition_maintenance(archivum: Archivum, 
         assert isinstance(_db.translate(caught.value, "Maintaining partitions"), IsolationError)
         with _db.transaction(conn, installed.archivum) as inside:
             assert inside.execute("SELECT ulduar.ensure_partitions(now())").fetchone() == (0,)
+
+
+# --- partitions: concurrency, the time window, session settings, truncate ---
+
+
+def month_start(months_ahead: int) -> datetime:
+    """The first instant (UTC) of the month *months_ahead* months after the current one."""
+    now = datetime.now(UTC)
+    index = now.year * 12 + now.month - 1 + months_ahead
+    return datetime(index // 12, index % 12 + 1, 1, tzinfo=UTC)
+
+
+def partition_names(archivum: Archivum, moment: datetime) -> list[str]:
+    with archivum.superuser() as su:
+        rows = su.execute(
+            "SELECT relname FROM pg_class WHERE relname LIKE %s ORDER BY relname", (f"%\\_{moment:%Y\\_%m}",)
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def ensure(config: Config, moment: datetime) -> int:
+    """`ulduar.ensure_partitions(moment, 0)` as the ledger role, in a transaction of its own."""
+    with ledger_connection(config) as conn, _db.transaction(conn, config.archivum) as inside:
+        row = inside.execute("SELECT ulduar.ensure_partitions(%s, 0)", (moment,)).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_two_callers_for_the_same_new_month_both_succeed_and_one_partition_is_made(
+    archivum: Archivum, installed: Config
+) -> None:
+    month = month_start(12) + timedelta(days=9)
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=2) as pool:
+        holder.execute("SELECT pg_advisory_lock(%s)", (PARTITION_LOCK_KEY,))
+        calls = [pool.submit(ensure, installed, month) for _ in range(2)]
+        wait_until_blocked(archivum, 2)  # both are in the function, queued behind the lock
+        holder.execute("SELECT pg_advisory_unlock(%s)", (PARTITION_LOCK_KEY,))
+        made = sorted(call.result(timeout=30) for call in calls)
+    assert made == [0, 2]  # the artifact and the lineage partition, made by one caller only
+    assert len(partition_names(archivum, month)) == 2
+
+
+def test_a_partition_another_session_made_meanwhile_is_not_an_error(archivum: Archivum, installed: Config) -> None:
+    month = month_start(14)
+    name = f"artifact_{month:%Y_%m}"
+    with archivum.superuser() as other, ThreadPoolExecutor(max_workers=1) as pool:
+        other.execute("BEGIN")
+        other.execute(
+            psycopg.sql.SQL("CREATE TABLE ulduar.{} PARTITION OF ulduar.artifact FOR VALUES FROM ({}) TO ({})").format(
+                psycopg.sql.Identifier(name), psycopg.sql.Literal(month), psycopg.sql.Literal(month_start(15))
+            )
+        )
+        call = pool.submit(ensure, installed, month)
+        wait_until_blocked(archivum, 1)  # the function's own CREATE waits for the table lock, then finds the name taken
+        other.execute("COMMIT")
+        assert call.result(timeout=30) == 1  # only the lineage partition is its own
+    assert len(partition_names(archivum, month)) == 2
+
+
+@pytest.mark.parametrize("offset", [timedelta(days=-365 * 16), timedelta(days=365 * 3)])
+def test_a_time_outside_the_partition_window_is_refused_clearly(installed: Config, offset: timedelta) -> None:
+    error = refusal(installed, "SELECT ulduar.ensure_partitions(%s, 0)", (datetime.now(UTC) + offset,))
+    assert type(error) is UlduarError
+    assert "outside the window from 15 years ago to 2 years ahead" in str(error)
+    assert ensure(installed, month_start(23)) == 2  # inside it, 23 months ahead
+
+
+def test_partition_bounds_are_utc_month_starts_whatever_the_session_settings(
+    archivum: Archivum, installed: Config
+) -> None:
+    month = month_start(6)
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
+        inside.execute("SET LOCAL TimeZone = 'Pacific/Kiritimati'")
+        inside.execute("SET LOCAL DateStyle = 'German'")
+        assert inside.execute("SELECT ulduar.ensure_partitions(%s, 0)", (month + timedelta(days=14),)).fetchone() == (
+            2,
+        )
+    with archivum.superuser() as su:
+        su.execute("SET TimeZone = 'UTC'")
+        bounds = su.execute(
+            "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = %s", (f"artifact_{month:%Y_%m}",)
+        ).fetchone()
+    assert bounds == (f"FOR VALUES FROM ('{month:%Y-%m-%d} 00:00:00+00') TO ('{month_start(7):%Y-%m-%d} 00:00:00+00')",)
+
+
+@pytest.mark.parametrize("table", ["artifact", "lineage_edge"])
+def test_a_partition_cannot_be_truncated_even_by_the_ledger_role(installed: Config, table: str) -> None:
+    error = refusal(installed, f"TRUNCATE ulduar.{table}_{datetime.now(UTC):%Y_%m}")
+    assert isinstance(error, IsolationError)
+    assert "append-only" in str(error)
+
+
+def test_every_partition_ensure_partitions_makes_carries_the_truncate_trigger(
+    archivum: Archivum, installed: Config
+) -> None:
+    ensure(installed, month_start(20))
+    partitions = (
+        "SELECT oid FROM pg_class WHERE relispartition AND relkind = 'r' AND relnamespace = 'ulduar'::regnamespace"
+    )
+    total = count(archivum, f"SELECT count(*) FROM ({partitions}) p")
+    guarded = count(
+        archivum,
+        f"SELECT count(*) FROM pg_trigger WHERE tgname = 'refuse_truncate' AND tgrelid IN ({partitions})",
+    )
+    assert total == guarded > 8
+
+
+def test_install_takes_no_steps_argument() -> None:
+    assert list(inspect.signature(install).parameters) == ["config", "allow_breaking"]

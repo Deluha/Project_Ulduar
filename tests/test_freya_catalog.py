@@ -1,22 +1,31 @@
-"""ulduar.freya.catalog: the catalog session on a real Archivum — registration, lookup, isolation, append-only.
-
-The helpers `onboarded`, `ms_ago` and `partition_exists` are shared by the history and lineage tests.
-"""
+"""ulduar.freya.catalog: the catalog session on a real Archivum — registration, lookup, isolation, append-only."""
 
 from __future__ import annotations
 
 import dataclasses
-import hashlib
+import inspect
 import uuid
-from datetime import UTC, datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
 import pytest
 
-from tests.conftest import Archivum, Recorder
+from tests.conftest import (
+    CHECKSUM,
+    PARTITION_LOCK_KEY,
+    Archivum,
+    count,
+    digest,
+    failure,
+    ms_ago,
+    onboarded,
+    partition_exists,
+    recorder_of,
+    wait_until_blocked,
+)
 from ulduar import _db, _ids, freya
-from ulduar.config import Config
 from ulduar.errors import (
     ArchivumUnavailable,
     IsolationError,
@@ -25,48 +34,9 @@ from ulduar.errors import (
     UnknownRecordError,
 )
 from ulduar.freya import ARTIFACT_KINDS, Catalog, Dataset, NodeRef, install, onboard_project, open_catalog
+from ulduar.freya._records import _is_missing_partition
 
 INSUFFICIENT_PRIVILEGE = "42501"
-CHECKSUM = hashlib.sha256(b"content").digest()
-
-
-def digest(text: str) -> bytes:
-    return hashlib.sha256(text.encode()).digest()
-
-
-def ms_ago(days: int) -> int:
-    """Unix milliseconds of *days* ago, for a record id in an old month."""
-    return int((datetime.now(UTC) - timedelta(days=days)).timestamp() * 1000)
-
-
-def onboarded(archivum: Archivum, tmp_path: Path, project: str = "alpha") -> Config:
-    """A config for *project* with a new recording role, the Archivum installed and the role onboarded."""
-    directory = tmp_path / project
-    directory.mkdir(exist_ok=True)
-    config = archivum.config(directory, project=project)
-    install(config)
-    onboard_project(config, project, archivum.recorders[-1].role)
-    return config
-
-
-def recorder_of(archivum: Archivum, config: Config) -> Recorder:
-    return next(r for r in archivum.recorders if r.env == config.archivum.dsn_env)
-
-
-def partition_exists(archivum: Archivum, table: str, unix_ms: int) -> bool:
-    moment = datetime.fromtimestamp(unix_ms / 1000, UTC)
-    with archivum.superuser() as su:
-        found = su.execute("SELECT to_regclass(%s)", (f"ulduar.{table}_{moment:%Y_%m}",)).fetchone()
-    assert found is not None
-    return found[0] is not None
-
-
-def failure(config: Config, env: str, statement: str, params: tuple[object, ...] = ()) -> psycopg.Error:
-    """The driver error of *statement* run in a transaction of its own on the connection named by *env*."""
-    with _db.open_connection(env, config.archivum) as conn:
-        with pytest.raises(psycopg.Error) as caught, _db.transaction(conn, config.archivum) as inside:
-            inside.execute(statement, params)
-    return caught.value
 
 
 # --- opening ---
@@ -119,6 +89,9 @@ def test_a_scope_the_project_lacks_is_unknown(archivum: Archivum, tmp_path: Path
 def test_the_facade_exports_every_name_it_lists() -> None:
     assert all(hasattr(freya, name) for name in freya.__all__)
     assert len(set(freya.__all__)) == len(freya.__all__)
+    assert not {"Step", "load_steps"} & set(freya.__all__)  # the step machinery is internal
+    assert not hasattr(freya, "Step") and not hasattr(freya, "load_steps")
+    assert list(inspect.signature(freya.install).parameters) == ["config", "allow_breaking"]
 
 
 def test_artifact_kinds_equal_the_rows_of_the_schema(archivum: Archivum, tmp_path: Path) -> None:
@@ -221,7 +194,7 @@ def test_an_old_month_without_a_partition_is_created_and_the_insert_retried(
     long_ago = ms_ago(430)
     config = onboarded(archivum, tmp_path)
     assert not partition_exists(archivum, "artifact", long_ago)
-    caplog.set_level("INFO", logger="ulduar.freya.catalog")
+    caplog.set_level("INFO", logger="ulduar.freya._records")
     with open_catalog(config) as catalog:
         old = catalog.register_artifact("log", CHECKSUM, 1, record_id=_ids.uuid7(long_ago))
         assert catalog.get_artifact(old.artifact_id) == old
@@ -376,3 +349,99 @@ def test_the_ledger_role_outside_maintenance_mode_is_refused_by_the_trigger(arch
         error = failure(config, config.archivum.ledger_dsn_env, statement)
         assert error.sqlstate == INSUFFICIENT_PRIVILEGE, statement
         assert "append-only" in (error.diag.message_primary or "")
+
+
+# --- partitions made on demand ---
+
+
+def test_two_recorders_meeting_the_same_missing_month_both_succeed(archivum: Archivum, tmp_path: Path) -> None:
+    long_ago = ms_ago(500)
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+
+    def record() -> uuid.UUID:
+        with open_catalog(config) as catalog:
+            return catalog.register_artifact("log", CHECKSUM, 1, record_id=_ids.uuid7(long_ago)).artifact_id
+
+    assert not partition_exists(archivum, "artifact", long_ago)
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=2) as pool:
+        holder.execute("SELECT pg_advisory_lock(%s)", (PARTITION_LOCK_KEY,))
+        calls = [pool.submit(record) for _ in range(2)]
+        wait_until_blocked(archivum, 2)  # both inserts failed on the missing month and now queue for the partition
+        holder.execute("SELECT pg_advisory_unlock(%s)", (PARTITION_LOCK_KEY,))
+        recorded = {call.result(timeout=30) for call in calls}
+    assert len(recorded) == 2
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 2
+    assert partition_exists(archivum, "artifact", long_ago)
+
+
+@pytest.mark.parametrize("unix_ms", [ms_ago(365 * 16), ms_ago(-365 * 3)], ids=["too old", "too far ahead"])
+def test_a_record_outside_the_partition_window_is_a_package_error(
+    archivum: Archivum, tmp_path: Path, unix_ms: int
+) -> None:
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        with pytest.raises(UlduarError, match=r"^Registering artifact .* failed: .*outside the window") as caught:
+            catalog.register_artifact("log", CHECKSUM, 1, record_id=_ids.uuid7(unix_ms))
+        assert type(caught.value) is UlduarError
+        assert catalog.find_artifacts() == []
+
+
+def test_only_a_missing_partition_is_told_from_other_check_violations(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path)
+    env = recorder_of(archivum, config).env
+    with open_catalog(config) as catalog:
+        project_id = catalog.project.project_id
+    insert = (
+        "INSERT INTO ulduar.artifact (project_id, scope, artifact_id, event_at, kind, checksum_algorithm, checksum,"
+        " size_bytes) VALUES (%s, 'default', %s, %s, 'log', 'sha256', %s, %s)"
+    )
+
+    def refused(unix_ms: int, size: int) -> psycopg.Error:
+        artifact_id = _ids.uuid7(unix_ms)
+        return failure(config, env, insert, (project_id, artifact_id, _ids.uuid7_time(artifact_id), CHECKSUM, size))
+
+    missing, negative = refused(ms_ago(500), 1), refused(ms_ago(0), -1)
+    assert missing.sqlstate == negative.sqlstate == "23514"
+    assert _is_missing_partition(missing) and not _is_missing_partition(negative)
+    assert negative.diag.constraint_name  # a named CHECK is the table's own refusal, never a missing partition
+
+
+# --- the database stamps recorded_at; a dataset belongs to the artifact's scope ---
+
+
+def test_a_recorder_cannot_set_recorded_at(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path)
+    with open_catalog(config) as catalog:
+        project_id = catalog.project.project_id
+    artifact_id, dataset_id = _ids.uuid7(), _ids.uuid7()
+    statements = [
+        (
+            "INSERT INTO ulduar.artifact (project_id, scope, artifact_id, event_at, recorded_at, kind,"
+            " checksum_algorithm, checksum, size_bytes) VALUES (%s, 'default', %s, %s, '2001-01-01', 'log', 'sha256',"
+            " %s, 1) RETURNING recorded_at = now(), recorded_at",
+            (project_id, artifact_id, _ids.uuid7_time(artifact_id), CHECKSUM),
+        ),
+        (
+            "INSERT INTO ulduar.dataset (project_id, scope, dataset_id, namespace, name, event_at, recorded_at)"
+            " VALUES (%s, 'default', %s, 'n', 'n', %s, '2001-01-01') RETURNING recorded_at = now(), recorded_at",
+            (project_id, dataset_id, _ids.uuid7_time(dataset_id)),
+        ),
+    ]
+    with _db.open_connection(recorder_of(archivum, config).env, config.archivum) as conn:
+        for statement, params in statements:
+            with _db.transaction(conn, config.archivum) as inside:
+                row = inside.execute(statement, params).fetchone()
+            assert row is not None
+            assert row[0] is True and row[1].year != 2001, statement
+
+
+def test_an_artifact_may_only_name_a_dataset_of_its_own_scope(archivum: Archivum, tmp_path: Path) -> None:
+    config = archivum.config(tmp_path)
+    install(config)
+    onboard_project(config, "test-project", archivum.recorders[-1].role, scopes=("default", "staging"))
+    with open_catalog(config) as catalog:
+        staged = catalog.register_dataset("warehouse", "orders", scope="staging")
+        with pytest.raises(UnknownRecordError, match="^Registering artifact .* failed"):
+            catalog.register_artifact("log", CHECKSUM, 1, dataset=staged)  # the catalog's scope is default
+        assert catalog.find_artifacts(scope="default") == []
+        recorded = catalog.register_artifact("log", CHECKSUM, 1, dataset=staged, scope="staging")
+        assert recorded.dataset_id == staged.dataset_id

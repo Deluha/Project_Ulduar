@@ -67,6 +67,11 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   the schema `ulduar`, and needs `CREATEROLE` (step 1 creates the group role `ulduar_recorder`), and one
   recording login role per project, created by the consumer. The recording roles hold `SELECT` and
   `INSERT` only (`freya/README.md`).
+- The group role `ulduar_recorder` is cluster-wide, shared by every database of the server. For a second
+  Archivum on the same server, the ledger role must hold `ADMIN OPTION` on `ulduar_recorder` (granted by a
+  superuser, once), or onboarding cannot add its project's login role to the group; a recording role of one
+  Archivum can then also read the ledger table and call `ensure_partitions` of another, where row-level
+  security shows it no row.
 
 ## Extending
 

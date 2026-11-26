@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psycopg
 import pytest
 
-from tests.conftest import Archivum
-from tests.test_freya_catalog import CHECKSUM, onboarded, partition_exists
-from ulduar import _ids
-from ulduar.errors import LineageCycleError, UnknownRecordError
+from tests.conftest import (
+    CHECKSUM,
+    Archivum,
+    count,
+    ms_ago,
+    onboarded,
+    partition_exists,
+    recorder_of,
+    wait_until_blocked,
+)
+from ulduar import _db, _ids
+from ulduar.config import Config
+from ulduar.errors import ArchivumUnavailable, LineageCycleError, UlduarError, UnknownRecordError
 from ulduar.freya import Artifact, Catalog, Dataset, LineageEdge, LineageNode, NodeRef, open_catalog
 
 
@@ -196,3 +208,173 @@ def test_a_deep_chain_is_walked_to_its_end(archivum: Archivum, tmp_path: Path) -
         walked = catalog.ancestors(chain[-1])
         assert [n.depth for n in walked] == list(range(1, 12))
         assert [n.ref for n in walked] == [a.ref for a in reversed(chain[:-1])]
+
+
+# --- idempotent edges ---
+
+
+def test_edges_recorded_again_under_the_same_ids_are_returned_as_stored(archivum: Archivum, tmp_path: Path) -> None:
+    ids = [_ids.uuid7(ms_ago(1)), _ids.uuid7(ms_ago(400))]  # two months, the older without a partition yet
+    run = uuid.uuid4()
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        child, first, second = artifact(catalog, "child"), artifact(catalog, "p1"), artifact(catalog, "p2")
+        edges = catalog.add_lineage(child, [first, second], run_id=run, record_ids=ids)
+        assert [e.edge_id for e in edges] == ids
+        assert [e.event_at for e in edges] == [_ids.uuid7_time(i) for i in ids]
+        assert catalog.add_lineage(child, [first, second], run_id=run, record_ids=ids) == edges
+        assert catalog.add_lineage(child, [first], run_id=run, record_ids=ids[:1]) == edges[:1]
+        assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 2
+        assert [n.ref for n in catalog.ancestors(child)] == sorted([first.ref, second.ref], key=lambda r: r.id)
+
+
+@pytest.mark.parametrize("change", ["parent", "child", "run"])
+def test_an_edge_id_reused_for_other_content_is_refused_and_nothing_is_kept(
+    archivum: Archivum, tmp_path: Path, change: str
+) -> None:
+    ids = [_ids.uuid7(), _ids.uuid7()]
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        child, first, second, other = (artifact(catalog, name) for name in ("child", "p1", "p2", "other"))
+        run = uuid.uuid4()
+        catalog.add_lineage(child, [first, second], run_id=run, record_ids=ids)
+        again = {
+            "parent": (child, [first, other], run),
+            "child": (other, [first, second], run),
+            "run": (child, [first, second], None),
+        }[change]
+        with pytest.raises(
+            UlduarError, match=f"Lineage edge {ids[1] if change == 'parent' else ids[0]} is already"
+        ) as caught:
+            catalog.add_lineage(again[0], again[1], run_id=again[2], record_ids=ids)
+        assert "different content" in str(caught.value)
+        assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 2
+
+
+@pytest.mark.parametrize(
+    ("record_ids", "message"),
+    [
+        ([_ids.uuid7()], "one id per parent: 2 parents, 1 ids"),
+        ([_ids.uuid7()] * 3, "one id per parent: 2 parents, 3 ids"),
+        ([_ids.uuid7(), uuid.uuid4()], "not a version 7 UUID"),
+        ([uuid.UUID(int=7)] * 2, "not a version 7 UUID"),
+    ],
+)
+def test_record_ids_must_be_one_uuid7_per_parent(
+    archivum: Archivum, tmp_path: Path, record_ids: list[uuid.UUID], message: str
+) -> None:
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        child, first, second = artifact(catalog, "child"), artifact(catalog, "p1"), artifact(catalog, "p2")
+        with pytest.raises(ValueError, match=message):
+            catalog.add_lineage(child, [first, second], record_ids=record_ids)
+        same = _ids.uuid7()
+        with pytest.raises(ValueError, match="distinct"):
+            catalog.add_lineage(child, [first, second], record_ids=[same, same])
+        assert catalog.ancestors(child) == []
+
+
+# --- the cycle guard under concurrency and isolation levels ---
+
+
+def insert_edge(tx: psycopg.Connection, project_id: uuid.UUID, child: Dataset, parent: Dataset) -> None:
+    edge_id = _ids.uuid7()
+    tx.execute(
+        "INSERT INTO ulduar.lineage_edge (project_id, edge_id, event_at, child_kind, child_id, parent_kind, parent_id)"
+        " VALUES (%s, %s, %s, 'dataset', %s, 'dataset', %s)",
+        (project_id, edge_id, _ids.uuid7_time(edge_id), child.dataset_id, parent.dataset_id),
+    )
+
+
+def two_datasets(config: Config) -> tuple[uuid.UUID, Dataset, Dataset]:
+    with open_catalog(config) as catalog:
+        return catalog.project.project_id, catalog.register_dataset("n", "one"), catalog.register_dataset("n", "two")
+
+
+@pytest.mark.parametrize("role_default", ["read committed", "repeatable read"])
+def test_opposite_edges_in_flight_together_cannot_both_commit(
+    archivum: Archivum, tmp_path: Path, role_default: str
+) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    project_id, one, two = two_datasets(config)
+    role = recorder_of(archivum, config).role
+    with archivum.superuser() as su:
+        su.execute(
+            psycopg.sql.SQL("ALTER ROLE {} SET default_transaction_isolation = {}").format(
+                psycopg.sql.Identifier(role), psycopg.sql.Literal(role_default)
+            )
+        )
+    inserted = threading.Event()
+
+    def raw_edge() -> None:  # one derived from two, in a transaction that stays open until the other is queued
+        with _db.open_connection(recorder_of(archivum, config).env, config.archivum) as conn:
+            with _db.transaction(conn, config.archivum) as tx:
+                insert_edge(tx, project_id, one, two)
+                inserted.set()
+                wait_until_blocked(archivum)
+
+    def library_edge() -> None:  # two derived from one
+        assert inserted.wait(timeout=30)
+        with open_catalog(config) as catalog:
+            catalog.add_lineage(two, [one])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        raw, library = pool.submit(raw_edge), pool.submit(library_edge)
+        raw.result(timeout=60)
+        with pytest.raises(LineageCycleError, match="would close a cycle"):
+            library.result(timeout=60)
+    assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 1
+
+
+def test_a_lineage_edge_outside_read_committed_is_refused_by_the_database(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path)
+    project_id, one, two = two_datasets(config)
+    with _db.open_connection(recorder_of(archivum, config).env, config.archivum) as conn:
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        with pytest.raises(psycopg.Error) as caught, _db.transaction(conn, config.archivum) as tx:
+            insert_edge(tx, project_id, one, two)
+    assert caught.value.sqlstate == "UL003"
+    error = _db.translate(caught.value, "Recording")
+    assert type(error) is UlduarError
+    assert "READ COMMITTED" in str(error)
+    assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 0
+
+
+def test_a_walk_over_a_cycle_that_got_into_the_table_ends(archivum: Archivum, tmp_path: Path) -> None:
+    """Bounded, the walk returns; unbounded, the statement timeout ends it — it never runs on."""
+    config = onboarded(archivum, tmp_path, statement_timeout_s=1)
+    with open_catalog(config) as catalog:
+        first, second = artifact(catalog, "first"), artifact(catalog, "second")
+        with archivum.superuser() as su:
+            su.execute("SET session_replication_role = replica")  # no trigger: the guard that normally refuses this
+            for child, parent in ((first, second), (second, first)):
+                edge_id = _ids.uuid7()
+                su.execute(
+                    "INSERT INTO ulduar.lineage_edge (project_id, edge_id, event_at, child_kind, child_id, parent_kind,"
+                    " parent_id) VALUES (%s, %s, %s, 'artifact', %s, 'artifact', %s)",
+                    (
+                        catalog.project.project_id,
+                        edge_id,
+                        _ids.uuid7_time(edge_id),
+                        child.artifact_id,
+                        parent.artifact_id,
+                    ),
+                )
+        assert {n.ref for n in catalog.ancestors(first, max_depth=4)} == {first.ref, second.ref}
+        with pytest.raises(ArchivumUnavailable):
+            catalog.descendants(second)
+
+
+def test_a_walk_over_stacked_diamonds_costs_nodes_times_depths_not_paths(archivum: Archivum, tmp_path: Path) -> None:
+    """Twenty stacked diamonds hold 2**20 paths; the walk returns each of their 61 nodes once, within the timeout."""
+    config = onboarded(archivum, tmp_path, statement_timeout_s=5)
+    with open_catalog(config) as catalog:
+        top = artifact(catalog, "top-0")
+        bottom = top
+        for level in range(20):
+            left, right = artifact(catalog, f"left-{level}"), artifact(catalog, f"right-{level}")
+            catalog.add_lineage(left, [bottom])
+            catalog.add_lineage(right, [bottom])
+            bottom = artifact(catalog, f"top-{level + 1}")
+            catalog.add_lineage(bottom, [left, right])
+        found = catalog.ancestors(bottom)
+    assert len(found) == 60
+    assert len({n.ref for n in found}) == 60
+    assert found[-1] == LineageNode(top.ref, 40)

@@ -49,6 +49,7 @@ CREATE TABLE ulduar.dataset (
   recorded_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, dataset_id),
   UNIQUE (project_id, scope, namespace, name),
+  UNIQUE (project_id, scope, dataset_id),             -- the target of the artifact's scope-bound reference
   FOREIGN KEY (project_id, scope) REFERENCES ulduar.scope
 );
 
@@ -66,7 +67,7 @@ CREATE TABLE ulduar.artifact (
   dataset_id         uuid,
   PRIMARY KEY (project_id, artifact_id, event_at),
   FOREIGN KEY (project_id, scope) REFERENCES ulduar.scope,
-  FOREIGN KEY (project_id, dataset_id) REFERENCES ulduar.dataset
+  FOREIGN KEY (project_id, scope, dataset_id) REFERENCES ulduar.dataset (project_id, scope, dataset_id)  -- the dataset is in the artifact's scope
 ) PARTITION BY RANGE (event_at);
 CREATE INDEX ON ulduar.artifact (project_id, artifact_id);
 CREATE INDEX ON ulduar.artifact (project_id, scope, checksum);
@@ -93,12 +94,18 @@ CREATE FUNCTION ulduar.node_exists(p uuid, k text, n uuid) RETURNS boolean LANGU
 $$ SELECT CASE k WHEN 'artifact' THEN EXISTS (SELECT FROM ulduar.artifact WHERE project_id = p AND artifact_id = n)
                  ELSE EXISTS (SELECT FROM ulduar.dataset WHERE project_id = p AND dataset_id = n) END $$;
 
--- One lock per project serialises edge inserts, so two concurrent edges cannot close a cycle together.
--- UL001: the edge would close a cycle. UL002: a node is not in the project (library error codes).
+-- One lock per project serialises edge inserts, so two concurrent edges cannot close a cycle together; the
+-- check reads the edges the lock holder committed, which only a READ COMMITTED transaction sees (each
+-- statement takes a new snapshot), so any other isolation level is refused.
+-- UL001: the edge would close a cycle. UL002: a node is not in the project. UL003: not READ COMMITTED.
 CREATE FUNCTION ulduar.check_lineage_edge() RETURNS trigger LANGUAGE plpgsql
   SET search_path = pg_catalog, ulduar AS
 $$
 BEGIN
+  IF current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'ulduar: lineage edges need a READ COMMITTED transaction, this one is %',
+      current_setting('transaction_isolation') USING ERRCODE = 'UL003';
+  END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('ulduar.lineage:' || NEW.project_id::text, 0));
   IF NOT ulduar.node_exists(NEW.project_id, NEW.child_kind, NEW.child_id)
      OR NOT ulduar.node_exists(NEW.project_id, NEW.parent_kind, NEW.parent_id) THEN
@@ -153,27 +160,44 @@ CREATE TABLE ulduar.redaction (
   PRIMARY KEY (project_id, redaction_id)
 );
 
+-- recorded_at is the database's time: whatever an inserting role supplies is overwritten (the DEFAULT stays for
+-- documentation; the trigger is what makes it true).
+CREATE FUNCTION ulduar.stamp_recorded_at() RETURNS trigger LANGUAGE plpgsql
+  SET search_path = pg_catalog AS
+$$ BEGIN NEW.recorded_at := now(); RETURN NEW; END $$;
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.project FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.project_member FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.scope FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.dataset FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.artifact FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.lineage_edge FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.history_retention_rule FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.history_retention_action FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.redaction FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
+
 -- Append-only, enforced by the database (D30): only the ledger role, in a declared maintenance mode.
--- The trigger arguments list the maintenance modes that may pass; none means never.
+-- Each trigger argument is `<operation>:<mode>` and lists one change that may pass in that mode (the setting
+-- `ulduar.maintenance`), so a mode never allows another operation; no argument means never.
 CREATE FUNCTION ulduar.refuse_history_change() RETURNS trigger LANGUAGE plpgsql
   SET search_path = pg_catalog, ulduar AS
 $$
 BEGIN
   IF ulduar.is_ledger_role()
-     AND coalesce(current_setting('ulduar.maintenance', true), '') = ANY (TG_ARGV) THEN
+     AND TG_OP || ':' || coalesce(current_setting('ulduar.maintenance', true), '') = ANY (TG_ARGV) THEN
     RETURN CASE TG_OP WHEN 'DELETE' THEN OLD WHEN 'UPDATE' THEN NEW END;
   END IF;
   RAISE EXCEPTION 'ulduar: % on %.% refused: recorded history is append-only', TG_OP, TG_TABLE_SCHEMA, TG_TABLE_NAME
     USING ERRCODE = 'insufficient_privilege';
 END
 $$;
-CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.artifact FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change('retention', 'redaction');
-CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.lineage_edge FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change('retention');
-CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.dataset FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change('redaction');
+CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.artifact FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change('DELETE:retention', 'UPDATE:redaction');
+CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.lineage_edge FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change('DELETE:retention');
+CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.dataset FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change('UPDATE:redaction');
 CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.history_retention_rule FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change();
 CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.history_retention_action FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change();
 CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON ulduar.redaction FOR EACH ROW EXECUTE FUNCTION ulduar.refuse_history_change();
--- A truncate is refused unconditionally: no argument means no maintenance mode passes.
+-- A truncate is refused unconditionally: no argument means no maintenance mode passes. Statement triggers are
+-- not inherited by partitions, so ensure_partitions attaches the same trigger to every partition it makes.
 CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.artifact FOR EACH STATEMENT EXECUTE FUNCTION ulduar.refuse_history_change();
 CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.lineage_edge FOR EACH STATEMENT EXECUTE FUNCTION ulduar.refuse_history_change();
 CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.dataset FOR EACH STATEMENT EXECUTE FUNCTION ulduar.refuse_history_change();
@@ -182,20 +206,35 @@ CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.history_retention_actio
 CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.redaction FOR EACH STATEMENT EXECUTE FUNCTION ulduar.refuse_history_change();
 
 -- Time partitions: created only by this step-defined function (R7); monthly, UTC.
+-- Callers serialise on the advisory lock -6595867142526573570 (the first 8 bytes of SHA-256("ulduar.partitions")
+-- as a big-endian signed 64-bit integer), and a partition made meanwhile is not an error (duplicate_table), so
+-- concurrent callers all succeed; the result counts only the partitions this call made. for_time is bounded to
+-- [now() - 15 years, now() + 2 years], which keeps every partition name's year at four digits; outside it the
+-- call raises. TimeZone and DateStyle are pinned so the bounds never depend on the caller's session.
+-- Each partition gets the refuse_truncate trigger (the parent's is not inherited).
 CREATE FUNCTION ulduar.ensure_partitions(for_time timestamptz, months_ahead integer DEFAULT 3) RETURNS integer
-  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, ulduar AS
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
 DECLARE m timestamp; t text; part text; made integer := 0;
 BEGIN
   IF months_ahead NOT BETWEEN 0 AND 24 THEN RAISE EXCEPTION 'ulduar: months_ahead out of range'; END IF;
+  IF for_time IS NULL OR for_time NOT BETWEEN now() - interval '15 years' AND now() + interval '2 years' THEN
+    RAISE EXCEPTION 'ulduar: partition time % is outside the window from 15 years ago to 2 years ahead', for_time;
+  END IF;
+  PERFORM pg_advisory_xact_lock(-6595867142526573570);
   FOREACH t IN ARRAY ARRAY['artifact', 'lineage_edge'] LOOP
     FOR i IN 0..months_ahead LOOP
       m := date_trunc('month', for_time AT TIME ZONE 'UTC') + make_interval(months => i);
       part := t || '_' || to_char(m, 'YYYY_MM');
       IF to_regclass(format('ulduar.%I', part)) IS NULL THEN
-        EXECUTE format('CREATE TABLE ulduar.%I PARTITION OF ulduar.%I FOR VALUES FROM (%L) TO (%L)',
-                       part, t, m AT TIME ZONE 'UTC', (m + interval '1 month') AT TIME ZONE 'UTC');
-        made := made + 1;
+        BEGIN
+          EXECUTE format('CREATE TABLE ulduar.%I PARTITION OF ulduar.%I FOR VALUES FROM (%L) TO (%L)',
+                         part, t, m AT TIME ZONE 'UTC', (m + interval '1 month') AT TIME ZONE 'UTC');
+          EXECUTE format('CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.%I FOR EACH STATEMENT'
+                         ' EXECUTE FUNCTION ulduar.refuse_history_change()', part);
+          made := made + 1;
+        EXCEPTION WHEN duplicate_table THEN NULL;
+        END;
       END IF;
     END LOOP;
   END LOOP;
@@ -204,12 +243,15 @@ END
 $$;
 
 -- Drops the empty monthly partitions that ended on or before the given time; a partition holding any row stays.
--- The ledger role only (retention); the table lock keeps a concurrent insert from landing in a partition being dropped.
+-- The ledger role only (retention). Both parents are locked first, in the order a recorder takes its locks
+-- (parent, then partition), which also locks every partition: no insert can land in a partition being dropped,
+-- and no recorder holding a parent lock can deadlock with this function.
 CREATE FUNCTION ulduar.drop_empty_partitions(before timestamptz) RETURNS integer
-  LANGUAGE plpgsql SET search_path = pg_catalog, ulduar AS
+  LANGUAGE plpgsql SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
 DECLARE p record; month_end timestamptz; has_rows boolean; dropped integer := 0;
 BEGIN
+  LOCK TABLE ulduar.artifact, ulduar.lineage_edge IN ACCESS EXCLUSIVE MODE;
   FOR p IN
     SELECT c.relname::text AS part, parent.relname::text AS tbl
     FROM pg_inherits i
@@ -221,7 +263,6 @@ BEGIN
   LOOP
     month_end := (to_date(right(p.part, 7), 'YYYY_MM') + interval '1 month') AT TIME ZONE 'UTC';
     IF month_end <= before THEN
-      EXECUTE format('LOCK TABLE ulduar.%I IN ACCESS EXCLUSIVE MODE', p.part);
       EXECUTE format('SELECT EXISTS (SELECT FROM ulduar.%I)', p.part) INTO has_rows;
       IF NOT has_rows THEN
         EXECUTE format('DROP TABLE ulduar.%I', p.part);

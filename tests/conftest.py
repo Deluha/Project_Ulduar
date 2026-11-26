@@ -9,11 +9,14 @@ passed.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
@@ -32,8 +35,10 @@ from dev_tools.services import (
     S3_ENDPOINT_VARIABLE,
     S3_SECRET_KEY_VARIABLE,
 )
+from ulduar import _db, _ids
 from ulduar.config import Config as UlduarConfig
 from ulduar.config import load_config
+from ulduar.freya import install, onboard_project, open_catalog
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # Marker → the fixtures that make a test need that service.
@@ -46,6 +51,11 @@ S3_SCHEMES = ("http", "https")
 TEST_BUCKET_PREFIX = "ulduar-test-"
 # The shared group role of step 1; the throwaway ledger role must be able to grant it to project roles.
 RECORDER_GROUP = "ulduar_recorder"
+# What the tests record: the SHA-256 of some content, and how long a test waits for another session to block.
+CHECKSUM = hashlib.sha256(b"content").digest()
+BLOCKED_WAIT_S = 15
+# The advisory lock step 1's ensure_partitions takes: the first 8 bytes of SHA-256("ulduar.partitions"), signed.
+PARTITION_LOCK_KEY = -6595867142526573570
 _PROBLEM_KEY = pytest.StashKey[str]()
 _service_test_ids: dict[str, set[str]] = {marker: set() for marker in SERVICE_FIXTURES}
 _service_tests_passed: dict[str, int] = {marker: 0 for marker in SERVICE_FIXTURES}
@@ -310,6 +320,82 @@ def archivum(db_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[Archivum]
         yield instance
     finally:
         instance.drop()
+
+
+# --- shared helpers of the Freya tests (an Archivum is installed, onboarded and inspected the same way in each) ---
+
+
+def digest(text: str) -> bytes:
+    return hashlib.sha256(text.encode()).digest()
+
+
+def ms_ago(days: int) -> int:
+    """Unix milliseconds of *days* ago, for a record id in an old month."""
+    return int((datetime.now(UTC) - timedelta(days=days)).timestamp() * 1000)
+
+
+def onboarded(archivum: Archivum, tmp_path: Path, project: str = "alpha", **timeouts: int) -> UlduarConfig:
+    """A config for *project* with a new recording role, the Archivum installed and the role onboarded."""
+    directory = tmp_path / project
+    directory.mkdir(exist_ok=True)
+    config = archivum.config(directory, project=project, **timeouts)
+    install(config)
+    onboard_project(config, project, archivum.recorders[-1].role)
+    return config
+
+
+def recorder_of(archivum: Archivum, config: UlduarConfig) -> Recorder:
+    return next(r for r in archivum.recorders if r.env == config.archivum.dsn_env)
+
+
+def partition_exists(archivum: Archivum, table: str, unix_ms: int) -> bool:
+    moment = datetime.fromtimestamp(unix_ms / 1000, UTC)
+    with archivum.superuser() as su:
+        found = su.execute("SELECT to_regclass(%s)", (f"ulduar.{table}_{moment:%Y_%m}",)).fetchone()
+    assert found is not None
+    return found[0] is not None
+
+
+def failure(config: UlduarConfig, env: str, statement: str, params: tuple[object, ...] = ()) -> psycopg.Error:
+    """The driver error of *statement* run in a transaction of its own on the connection named by *env*."""
+    with _db.open_connection(env, config.archivum) as conn:
+        with pytest.raises(psycopg.Error) as caught, _db.transaction(conn, config.archivum) as inside:
+            inside.execute(statement, params)
+    return caught.value
+
+
+def count(archivum: Archivum, query: str, *params: object) -> int:
+    """The one number a superuser's *query* returns."""
+    with archivum.superuser() as su:
+        row = su.execute(query, params).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def old_artifacts(config: UlduarConfig, *days: int) -> list[uuid.UUID]:
+    """Record one artifact per entry of *days*, that many days old, as the config's recording role."""
+    with open_catalog(config) as catalog:
+        return [
+            catalog.register_artifact("log", CHECKSUM, 1, record_id=_ids.uuid7(ms_ago(d))).artifact_id for d in days
+        ]
+
+
+def wait_until_blocked(archivum: Archivum, sessions: int = 1) -> None:
+    """Return once *sessions* sessions of the throwaway database wait for a lock; fail after `BLOCKED_WAIT_S`.
+
+    The deterministic half of a race test: the test holds a lock (or an open transaction), starts the
+    competitors, and acts only when they are provably queued behind it.
+    """
+    query = (
+        "SELECT count(DISTINCT l.pid) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid"
+        " WHERE NOT l.granted AND a.datname = current_database()"
+    )
+    deadline = time.monotonic() + BLOCKED_WAIT_S
+    while count(archivum, query) < sessions:
+        assert time.monotonic() < deadline, (
+            f"fewer than {sessions} session(s) waited for a lock within {BLOCKED_WAIT_S}s"
+        )
+        time.sleep(0.05)
 
 
 @pytest.fixture(scope="session")

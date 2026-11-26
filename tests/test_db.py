@@ -64,6 +64,9 @@ def test_check_transport_refuses_a_malformed_dsn_without_echoing_it() -> None:
         _db.check_transport(dsn, "ARCHIVUM_DSN", {})
     assert "hunter2-secret" not in str(caught.value)
     assert "ARCHIVUM_DSN" in str(caught.value)
+    # libpq's own parse message can quote the string, so it is neither the cause nor the context
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
 
 
 def test_remote_refusal_never_names_the_password() -> None:
@@ -263,6 +266,9 @@ def raise_in_database(db_conn: psycopg.Connection, sqlstate: str) -> psycopg.Err
     [
         ("UL001", LineageCycleError),
         ("UL002", UnknownRecordError),
+        ("UL003", UlduarError),
+        ("40P01", ArchivumUnavailable),
+        ("40001", ArchivumUnavailable),
         ("23503", UnknownRecordError),
         ("42501", IsolationError),
         ("08006", ArchivumUnavailable),
@@ -287,3 +293,29 @@ def test_translate_a_real_foreign_key_violation(db_conn: psycopg.Connection) -> 
     with pytest.raises(psycopg.Error) as caught:
         db_conn.execute("INSERT INTO child VALUES (1)")
     assert type(_db.translate(caught.value, "Recording")) is UnknownRecordError
+
+
+# --- error translation: transient server refusals, the empty message, the pinned isolation ---
+
+
+def test_translate_a_driver_error_without_a_message_does_not_fail() -> None:
+    error = _db.translate(psycopg.Error(), "Reading")
+    assert type(error) is UlduarError
+    assert str(error) == "Reading failed: "
+
+
+def test_the_connection_is_pinned_to_read_committed_whatever_the_role_defaults_to(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = archivum.config(tmp_path)
+    recorder = archivum.recorders[-1].role
+    with archivum.superuser() as su:
+        su.execute(
+            psycopg.sql.SQL("ALTER ROLE {} SET default_transaction_isolation = 'repeatable read'").format(
+                psycopg.sql.Identifier(recorder)
+            )
+        )
+    with _db.open_connection(config.archivum.dsn_env, config.archivum) as conn:
+        assert conn.execute("SHOW default_transaction_isolation").fetchone() == ("repeatable read",)
+        with _db.transaction(conn, config.archivum) as inside:
+            assert inside.execute("SHOW transaction_isolation").fetchone() == ("read committed",)

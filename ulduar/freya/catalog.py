@@ -1,36 +1,36 @@
 """The catalog session: register and look up a project's datasets and artifacts in the Archivum.
 
-Input: a `Config` (the recording role's connection string is named by `archivum.dsn_env`). Output: the frozen
-records `Project`, `Dataset`, `Artifact`, `NodeRef`, and `open_catalog`, which yields a `Catalog` holding one
-connection. Every `Catalog` call is one transaction; the recording role can only select and insert, and
-row-level security shows it only its own project, so nothing here can touch another project or change
-recorded history. A partitioned insert that meets a month without a partition creates it once through the
-step's own function and retries (`insert_with_partition_retry`, shared with lineage).
+Input: a `Config` (the recording role's connection string is named by `archivum.dsn_env`). Output: `open_catalog`,
+which yields a `Catalog` holding one connection, and the records it returns (`_records`). Every `Catalog` call
+is one transaction; the recording role can only select and insert, and row-level security shows it only its
+own project, so nothing here can touch another project or change recorded history. A partitioned insert that
+meets a month without a partition creates it once through the step's own function and retries
+(`insert_with_partition_retry`, shared with lineage).
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime
-from typing import TYPE_CHECKING, Literal, TypeVar
+from collections.abc import Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from uuid import UUID
 
-import psycopg
 from psycopg import sql
-from psycopg.rows import TupleRow
 
 from ulduar import _db, _ids
-from ulduar.config import NAME_PATTERN, ArchivumSettings, Config
+from ulduar.config import ArchivumSettings, Config, check_name
 from ulduar.errors import UlduarError, UnknownRecordError
-from ulduar.freya import ledger
-
-if TYPE_CHECKING:
-    from ulduar.freya.lineage import LineageEdge, LineageNode
-
-logger = logging.getLogger(__name__)
+from ulduar.freya import ledger, lineage
+from ulduar.freya._records import (
+    Artifact,
+    Connection,
+    Dataset,
+    LineageEdge,
+    LineageNode,
+    NodeRef,
+    Project,
+    insert_with_partition_retry,
+    qualified,
+)
 
 # The rows of `ulduar.artifact_kind` (step 1 is the schema's home; a test holds the two equal).
 ARTIFACT_KINDS = ("raw_file", "database_dump", "report", "model", "log")
@@ -39,17 +39,11 @@ CHECKSUM_BYTES = 32
 NAMESPACE_MAX = 200
 NAME_MAX = 500
 ORIGIN_MAX = 1000
-# `INSERT` into a partitioned table whose month has no partition: check_violation, "no partition of relation …".
-_CHECK_VIOLATION = "23514"
-_NO_PARTITION_MESSAGE = "no partition of relation"
 
-Connection = psycopg.Connection[TupleRow]
-Result = TypeVar("Result")
-
-_PROJECT = sql.Identifier("ulduar", "project")
-_SCOPE = sql.Identifier("ulduar", "scope")
-_DATASET = sql.Identifier("ulduar", "dataset")
-_ARTIFACT = sql.Identifier("ulduar", "artifact")
+_PROJECT = qualified("project")
+_SCOPE = qualified("scope")
+_DATASET = qualified("dataset")
+_ARTIFACT = qualified("artifact")
 
 
 def _columns(*names: str) -> sql.Composable:
@@ -85,65 +79,6 @@ _SELECT_ARTIFACT = sql.SQL("SELECT {columns} FROM {table} WHERE project_id = %s 
     table=_ARTIFACT, columns=_ARTIFACT_COLUMNS
 )
 _FIND_ARTIFACTS = sql.SQL("SELECT {columns} FROM {table} WHERE {conditions} ORDER BY event_at, artifact_id")
-
-
-@dataclass(frozen=True, slots=True)
-class Project:
-    """A project of the Archivum, as the configuration names it."""
-
-    project_id: UUID
-    name: str
-
-
-@dataclass(frozen=True, slots=True)
-class NodeRef:
-    """A lineage node: an artifact or a dataset, by id."""
-
-    kind: Literal["artifact", "dataset"]
-    id: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class Dataset:
-    """A dataset, identified by project, scope, namespace and name; `event_at` is the time inside its id."""
-
-    dataset_id: UUID
-    project_id: UUID
-    scope: str
-    namespace: str
-    name: str
-    event_at: datetime
-    recorded_at: datetime
-
-    @property
-    def ref(self) -> NodeRef:
-        return NodeRef("dataset", self.dataset_id)
-
-
-@dataclass(frozen=True, slots=True)
-class Artifact:
-    """An archived object's catalog entry: SHA-256 checksum, size, kind, origin and the dataset it belongs to."""
-
-    artifact_id: UUID
-    project_id: UUID
-    scope: str
-    kind: str
-    checksum: bytes
-    size: int
-    origin: str | None
-    dataset_id: UUID | None
-    event_at: datetime
-    recorded_at: datetime
-
-    @property
-    def ref(self) -> NodeRef:
-        return NodeRef("artifact", self.artifact_id)
-
-
-def _check_scope(scope: str) -> str:
-    if not isinstance(scope, str) or not NAME_PATTERN.fullmatch(scope):
-        raise ValueError(f"Scope {scope!r} must match {NAME_PATTERN.pattern}")
-    return scope
 
 
 def _check_text(argument: str, value: str | None, limit: int, *, required: bool = True) -> None:
@@ -182,32 +117,6 @@ def _record_id(record_id: UUID | None) -> UUID:
     return record_id
 
 
-def _is_missing_partition(error: psycopg.Error) -> bool:
-    return error.sqlstate == _CHECK_VIOLATION and (error.diag.message_primary or "").startswith(_NO_PARTITION_MESSAGE)
-
-
-def insert_with_partition_retry(
-    conn: Connection, settings: ArchivumSettings, event_at: datetime, insert: Callable[[Connection], Result]
-) -> Result:
-    """Run *insert* in a transaction; if its month has no partition, create it and run it once more.
-
-    The failed insert has rolled back, so the partition is made by `ulduar.ensure_partitions` (the step's
-    own function; the schema is never changed from Python) in a transaction of its own, then *insert* runs
-    again. *insert* must be safe to run twice: it carries the record's own id, so a retry cannot duplicate it.
-    """
-    try:
-        with _db.transaction(conn, settings) as tx:
-            return insert(tx)
-    except psycopg.Error as e:
-        if not _is_missing_partition(e):
-            raise
-    with _db.transaction(conn, settings) as tx:
-        tx.execute("SELECT ulduar.ensure_partitions(%s, 0)", (event_at,))
-    logger.info("created the time partitions for %s", event_at.strftime("%Y-%m"))
-    with _db.transaction(conn, settings) as tx:
-        return insert(tx)
-
-
 class Catalog:
     """One project's catalog session over one connection; made by `open_catalog`, closed with it.
 
@@ -221,14 +130,12 @@ class Catalog:
         self.project = project
         self.scope = scope
 
-    @contextmanager
-    def _transaction(self, what: str) -> Iterator[Connection]:
+    def _transaction(self, what: str) -> AbstractContextManager[Connection]:
         """One transaction whose driver errors are raised as the package's exceptions, worded `<what> failed`."""
-        with _db.translated(what), _db.transaction(self._conn, self._settings) as tx:
-            yield tx
+        return _db.translated_transaction(self._conn, self._settings, what)
 
     def _scope(self, scope: str | None) -> str:
-        return self.scope if scope is None else _check_scope(scope)
+        return self.scope if scope is None else check_name(scope, "scope")
 
     def register_dataset(self, namespace: str, name: str, *, scope: str | None = None) -> Dataset:
         """Register the dataset *namespace*/*name* in the scope; registering it again returns the existing one."""
@@ -301,7 +208,7 @@ class Catalog:
             return existing
 
         with _db.translated(f"Registering artifact {artifact_id}"):
-            return insert_with_partition_retry(self._conn, self._settings, event_at, insert)
+            return insert_with_partition_retry(self._conn, self._settings, [event_at], insert)
 
     def get_artifact(self, artifact_id: UUID) -> Artifact:
         """The recorded artifact *artifact_id*; `UnknownRecordError` when this project has none."""
@@ -339,23 +246,23 @@ class Catalog:
             rows = tx.execute(query, (self.project.project_id, *given.values())).fetchall()
         return [Artifact(*row) for row in rows]
 
-    # NOTE: the lineage calls import `lineage` inside the method: it imports this module for `NodeRef`, `Dataset`
-    # and `insert_with_partition_retry`, so a top-level import here would be circular.
     def add_lineage(
         self,
         child: Artifact | Dataset | NodeRef,
         parents: Sequence[Artifact | Dataset | NodeRef],
         *,
         run_id: UUID | None = None,
+        record_ids: Sequence[UUID] | None = None,
     ) -> list[LineageEdge]:
         """Record that *child* was derived from each of *parents* (all edges or none); *run_id* names the run.
 
-        `ValueError` for no parents or a node derived from itself; `UnknownRecordError` for a node that is not
-        in this project; `LineageCycleError` when an edge would close a cycle.
+        *record_ids*, one UUIDv7 per parent, make the call idempotent: an edge already recorded under its id with
+        the same content is returned as stored, with other content it raises `UlduarError`; each edge's
+        `event_at` is the time of its id. `ValueError` for no parents, a node derived from itself or bad
+        *record_ids*; `UnknownRecordError` for a node that is not in this project; `LineageCycleError` when an
+        edge would close a cycle.
         """
-        from ulduar.freya import lineage
-
-        return lineage.add_edges(self, child, parents, run_id)
+        return lineage.add_edges(self._conn, self._settings, self.project, child, parents, run_id, record_ids)
 
     def ancestors(self, node: Artifact | Dataset | NodeRef, *, max_depth: int | None = None) -> list[LineageNode]:
         """What *node* was derived from, directly or not: each node once at its minimum depth, nearest first.
@@ -363,15 +270,11 @@ class Catalog:
         Ordered by depth, kind and id; *node* itself is not included; *max_depth* (at least 1) limits the walk.
         A node that is unknown, or has no edges, has no ancestors.
         """
-        from ulduar.freya import lineage
-
-        return lineage.walk(self, "ancestors", node, max_depth)
+        return lineage.walk(self._conn, self._settings, self.project, "ancestors", node, max_depth)
 
     def descendants(self, node: Artifact | Dataset | NodeRef, *, max_depth: int | None = None) -> list[LineageNode]:
         """What was derived from *node*, directly or not; ordered and limited as `ancestors`."""
-        from ulduar.freya import lineage
-
-        return lineage.walk(self, "descendants", node, max_depth)
+        return lineage.walk(self._conn, self._settings, self.project, "descendants", node, max_depth)
 
 
 def _select_artifact(tx: Connection, project_id: UUID, artifact_id: UUID) -> Artifact | None:

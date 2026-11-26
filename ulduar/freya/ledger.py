@@ -24,6 +24,7 @@ import ulduar
 from ulduar import _db
 from ulduar.config import Config
 from ulduar.errors import ConfigurationError, LedgerError, SchemaVersionError
+from ulduar.freya._records import SCHEMA, qualified
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,9 @@ ADDITIVE = "additive"
 BREAKING = "breaking"
 # The first 8 bytes of SHA-256("ulduar.schema_ledger"), read as a big-endian signed 64-bit integer.
 LEDGER_LOCK_KEY = -7893859028443541850
-SCHEMA = "ulduar"
 LEDGER_TABLE = "schema_ledger"
-_LEDGER = sql.Identifier(SCHEMA, LEDGER_TABLE)
+_LEDGER = qualified(LEDGER_TABLE)
+_NOT_INSTALLED = "The Archivum is not installed — run freya.install"
 
 Release = tuple[int, int, int]
 
@@ -225,7 +226,7 @@ def check_schema(conn: psycopg.Connection[TupleRow], steps: tuple[Step, ...]) ->
     applied step's checksum differs. An unknown additive step is accepted.
     """
     if not _ledger_installed(conn):
-        raise SchemaVersionError("The Archivum is not installed — run freya.install")
+        raise SchemaVersionError(_NOT_INSTALLED)
     applied = _read_applied(conn)
     assessment = _assess(applied, steps)
     problem = assessment.schema_problem()
@@ -273,7 +274,7 @@ def _install_in_transaction(conn: psycopg.Connection[TupleRow], steps: tuple[Ste
         )
     for step in assessment.pending:
         _apply(conn, step)
-    conn.execute("SELECT ulduar.ensure_partitions(now())")
+    conn.execute(sql.SQL("SELECT {}(now())").format(qualified("ensure_partitions")))
 
 
 def _read_status(conn: psycopg.Connection[TupleRow], steps: tuple[Step, ...]) -> SchemaStatus:
@@ -289,15 +290,19 @@ def open_ledger_connection(config: Config, purpose: str) -> psycopg.Connection[T
     return _db.open_connection(settings.ledger_dsn_env, settings)
 
 
-def install(config: Config, *, allow_breaking: bool = False, steps: tuple[Step, ...] | None = None) -> SchemaStatus:
+def install(config: Config, *, allow_breaking: bool = False) -> SchemaStatus:
     """Install or upgrade the Archivum's schema to this library's steps, as the ledger role.
 
     One transaction under an advisory lock: another install waits, up to the lock timeout, then sees the
     steps this one applied. A pending breaking step needs *allow_breaking*; nothing is applied without it.
-    *steps* exists so a test can supply synthetic steps. Returns the status after the install.
+    Returns the status after the install.
     """
+    return _install(config, load_steps(), allow_breaking=allow_breaking)
+
+
+def _install(config: Config, steps: tuple[Step, ...], *, allow_breaking: bool) -> SchemaStatus:
+    """`install` with the steps given: the one implementation, and the way a test supplies synthetic steps."""
     settings = config.archivum
-    steps = load_steps() if steps is None else steps
     with (
         open_ledger_connection(config, "install") as conn,
         _db.translated("Installing the Archivum"),
@@ -321,5 +326,5 @@ def schema_status(config: Config) -> SchemaStatus:
         _db.transaction(conn, settings),
     ):
         if not _ledger_installed(conn):
-            raise SchemaVersionError("The Archivum is not installed — run freya.install")
+            raise SchemaVersionError(_NOT_INSTALLED)
         return _read_status(conn, steps)

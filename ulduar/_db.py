@@ -32,11 +32,14 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SECURE_SSLMODES = {"verify-full", "verify-ca"}
 SUPPORTED_SERVER_MAJOR = 18
 APPLICATION_NAME = "ulduar"
-# SQLSTATEs the library raises itself (step 1): a lineage cycle, a node outside the project.
+# SQLSTATEs the library raises itself (step 1): a lineage cycle, a node outside the project. UL003 (a lineage
+# edge outside READ COMMITTED) has no exception of its own: it surfaces as a plain `UlduarError`.
 SQLSTATE_LINEAGE_CYCLE = "UL001"
 SQLSTATE_UNKNOWN_NODE = "UL002"
-# Timeouts and lock refusals: query_canceled, lock_not_available, idle-in-transaction and transaction timeouts.
-_TIMEOUT_SQLSTATES = {"57014", "55P03", "25P03", "25P04"}
+# Timeouts, lock refusals, a deadlock and a serialization failure (the server rolled this transaction back):
+# query_canceled, lock_not_available, idle-in-transaction and transaction timeouts, deadlock_detected,
+# serialization_failure.
+_TRANSIENT_SQLSTATES = {"57014", "55P03", "25P03", "25P04", "40P01", "40001"}
 _CONNECTION_CLASS = "08"
 _OPERATOR_INTERVENTION_PREFIX = "57P"  # admin shutdown, crash shutdown, cannot connect now
 _INSUFFICIENT_PRIVILEGE = "42501"
@@ -54,8 +57,9 @@ def read_dsn(variable: str, environ: Mapping[str, str] = os.environ) -> str:
 def _parse(dsn: str, variable: str) -> dict[str, Any]:
     try:
         return dict(conninfo_to_dict(dsn))
-    except psycopg.Error as e:
-        raise ConfigurationError(f"The connection string in {variable} is malformed") from e
+    except psycopg.Error:
+        # `from None`: libpq's parse message can quote part of the string, password included (hard rule 11).
+        raise ConfigurationError(f"The connection string in {variable} is malformed") from None
 
 
 # DSN key -> the environment variable libpq falls back to when the DSN leaves the key out.
@@ -112,6 +116,8 @@ def open_connection(variable: str, settings: ArchivumSettings) -> psycopg.Connec
         )
     except psycopg.Error as e:
         raise ArchivumUnavailable(f"Connecting to the Archivum failed: {host}") from e
+    # Pinned whatever the role or database defaults to: the lineage cycle guard relies on READ COMMITTED.
+    conn.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
     major = conn.info.server_version // 10000
     if major != SUPPORTED_SERVER_MAJOR:
         conn.close()
@@ -152,16 +158,25 @@ def translated(what: str) -> Iterator[None]:
         raise translate(e, what) from e
 
 
+@contextmanager
+def translated_transaction(
+    conn: psycopg.Connection[TupleRow], settings: ArchivumSettings, what: str
+) -> Iterator[psycopg.Connection[TupleRow]]:
+    """`transaction` with `translated`: a driver error is raised as the package's exception, worded `<what> failed`."""
+    with translated(what), transaction(conn, settings) as tx:
+        yield tx
+
+
 def translate(error: psycopg.Error, what: str) -> UlduarError:
     """The package exception for a driver error, worded `<what> failed: <server's primary message>`.
 
     Callers raise it `from` the driver error. The server's primary message never holds the DSN.
     """
     sqlstate = error.sqlstate or ""
-    message = f"{what} failed: {error.diag.message_primary or str(error).splitlines()[0]}"
+    message = f"{what} failed: {error.diag.message_primary or next(iter(str(error).splitlines()), '')}"
     if (
         sqlstate.startswith((_CONNECTION_CLASS, _OPERATOR_INTERVENTION_PREFIX))
-        or sqlstate in _TIMEOUT_SQLSTATES
+        or sqlstate in _TRANSIENT_SQLSTATES
         or isinstance(error, psycopg.OperationalError)
     ):
         return ArchivumUnavailable(message)

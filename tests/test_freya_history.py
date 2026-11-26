@@ -4,15 +4,26 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
 import pytest
 
-from tests.conftest import Archivum
-from tests.test_freya_catalog import CHECKSUM, ms_ago, onboarded, partition_exists
+from tests.conftest import (
+    CHECKSUM,
+    Archivum,
+    count,
+    ms_ago,
+    old_artifacts,
+    onboarded,
+    partition_exists,
+    recorder_of,
+    wait_until_blocked,
+)
 from ulduar import _db, _ids
 from ulduar.config import Config
 from ulduar.errors import ConfigurationError, SchemaVersionError, UlduarError, UnknownRecordError
@@ -26,7 +37,7 @@ from ulduar.freya import (
     open_catalog,
     redact,
 )
-from ulduar.freya.history import MAINTENANCE_SETTING
+from ulduar.freya.history import MAINTENANCE_SETTING, retention_lock_name
 
 OLD_DAYS = 200
 OLDER_DAYS = 300
@@ -34,21 +45,6 @@ OLDER_DAYS = 300
 
 def without_ledger(config: Config) -> Config:
     return dataclasses.replace(config, archivum=dataclasses.replace(config.archivum, ledger_dsn_env=None))
-
-
-def count(archivum: Archivum, query: str, *params: object) -> int:
-    with archivum.superuser() as su:
-        row = su.execute(query, params).fetchone()
-    assert row is not None
-    return int(row[0])
-
-
-def old_artifacts(config: Config, *days: int) -> list[uuid.UUID]:
-    """Record one artifact per entry of *days*, that many days old, as the config's recording role."""
-    with open_catalog(config) as catalog:
-        return [
-            catalog.register_artifact("log", CHECKSUM, 1, record_id=_ids.uuid7(ms_ago(d))).artifact_id for d in days
-        ]
 
 
 def old_edge(archivum: Archivum, project: str, child: uuid.UUID, parent: uuid.UUID, days: int) -> None:
@@ -118,6 +114,11 @@ def test_a_role_of_another_project_is_refused_and_nothing_is_kept(archivum: Arch
         onboard_project(config, "beta", role, scopes=("default", "more"))
     assert count(archivum, "SELECT count(*) FROM ulduar.project WHERE name = 'beta'") == 0
     assert count(archivum, "SELECT count(*) FROM ulduar.scope") == 1
+
+
+def test_scopes_given_as_one_string_is_refused_before_any_sql(archivum: Archivum, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="'raw'.*not a single string"):
+        onboard_project(archivum.config(tmp_path), "alpha", "any_role", scopes="raw")
 
 
 def test_an_unknown_login_role_is_refused(archivum: Archivum, tmp_path: Path) -> None:
@@ -402,3 +403,128 @@ def test_a_ledger_call_before_install_is_a_schema_version_error(archivum: Archiv
         apply_history_retention(config)
     with pytest.raises(SchemaVersionError, match="not installed"):
         onboard_project(config, "alpha", archivum.recorders[-1].role)
+
+
+# --- a maintenance mode passes only its own operation ---
+
+
+@pytest.mark.parametrize(
+    ("mode", "statement"),
+    [
+        ("redaction", "DELETE FROM ulduar.artifact"),
+        ("retention", "UPDATE ulduar.artifact SET origin = 'x'"),
+        ("redaction", "DELETE FROM ulduar.dataset"),
+        ("retention", "UPDATE ulduar.dataset SET name = 'x'"),
+        ("redaction", "DELETE FROM ulduar.lineage_edge"),
+        ("redaction", "UPDATE ulduar.lineage_edge SET run_id = NULL"),
+        ("retention", "UPDATE ulduar.lineage_edge SET run_id = NULL"),
+    ],
+)
+def test_a_maintenance_mode_does_not_allow_the_other_modes_operation(
+    archivum: Archivum, tmp_path: Path, mode: str, statement: str
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    with open_catalog(config) as catalog:
+        child, parent = catalog.register_artifact("log", CHECKSUM, 1, origin="a"), catalog.register_dataset("n", "d")
+        catalog.add_lineage(child, [parent])
+    error = maintenance_failure(config, mode, statement)
+    assert error.sqlstate == "42501"
+    assert "append-only" in (error.diag.message_primary or "")
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact WHERE origin = 'a'") == 1
+
+
+# --- retention races: a recorder holding locks, and a rule declared meanwhile ---
+
+
+def insert_current_artifact(tx: psycopg.Connection, project_id: uuid.UUID) -> None:
+    artifact_id = _ids.uuid7()
+    tx.execute(
+        "INSERT INTO ulduar.artifact (project_id, scope, artifact_id, event_at, kind, checksum_algorithm, checksum,"
+        " size_bytes) VALUES (%s, 'default', %s, %s, 'log', 'sha256', %s, 1)",
+        (project_id, artifact_id, _ids.uuid7_time(artifact_id), CHECKSUM),
+    )
+
+
+def test_retention_does_not_deadlock_with_a_recorder_that_holds_locks_and_reads_every_partition(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    old_artifacts(config, OLD_DAYS)
+    declare_history_retention(config, "alpha", "artifact", 30)
+    with open_catalog(config) as catalog:
+        project_id = catalog.project.project_id
+    holding = threading.Event()
+
+    def recorder() -> int:
+        with _db.open_connection(recorder_of(archivum, config).env, config.archivum) as conn:
+            with _db.transaction(conn, config.archivum) as tx:
+                insert_current_artifact(tx, project_id)  # the locks of an insert: the parent and this month's partition
+                holding.set()
+                wait_until_blocked(archivum)  # retention is queued for the parent
+                row = tx.execute("SELECT count(*) FROM ulduar.artifact").fetchone()  # every partition, pruned none
+        assert row is not None
+        return int(row[0])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        recording = pool.submit(recorder)
+        assert holding.wait(timeout=30)
+        applying = pool.submit(apply_history_retention, config, dry_run=False)
+        assert recording.result(timeout=60) == 1  # its own row; a deadlock would end one of the two with an error
+        [result] = applying.result(timeout=60)
+    assert (result.history, result.rows) == ("artifact", 1)
+    assert not partition_exists(archivum, "artifact", ms_ago(OLD_DAYS))
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 1
+
+
+@pytest.mark.parametrize("later_keep_days", [None, 1000])
+def test_applying_honours_a_rule_declared_after_it_read_the_rules(
+    archivum: Archivum, tmp_path: Path, later_keep_days: int | None
+) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    old_artifacts(config, OLD_DAYS)
+    declare_history_retention(config, "alpha", "artifact", 30)
+    project_id = count_project_id(archivum)
+    lock = retention_lock_name(project_id, "artifact")
+    later_rule = _ids.uuid7()
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=1) as pool:
+        holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
+        applying = pool.submit(apply_history_retention, config, dry_run=False)
+        wait_until_blocked(archivum)  # it read keep 30 and waits for the lock before deleting
+        holder.execute(
+            "INSERT INTO ulduar.history_retention_rule (project_id, rule_id, event_at, history, keep_days)"
+            " VALUES (%s, %s, %s, 'artifact', %s)",
+            (project_id, later_rule, _ids.uuid7_time(later_rule), later_keep_days),
+        )
+        holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
+        results = applying.result(timeout=30)
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 1  # the 200-day-old row stays under both
+    assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_action") == (
+        0 if later_keep_days is None else 1
+    )
+    if later_keep_days is None:
+        assert results == []
+    else:
+        [result] = results
+        assert (result.rule_id, result.rows) == (later_rule, 0)
+        assert result.cutoff < datetime.now(UTC) - timedelta(days=999)
+
+
+def count_project_id(archivum: Archivum) -> uuid.UUID:
+    with archivum.superuser() as su:
+        row = su.execute("SELECT project_id FROM ulduar.project WHERE name = 'alpha'").fetchone()
+    assert row is not None
+    project_id: uuid.UUID = row[0]
+    return project_id
+
+
+def test_declaring_waits_for_the_retention_lock_of_its_project_and_history(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    lock = retention_lock_name(count_project_id(archivum), "artifact")
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=1) as pool:
+        holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
+        declaring = pool.submit(declare_history_retention, config, "alpha", "artifact", 30)
+        wait_until_blocked(archivum)
+        assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_rule") == 0
+        holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
+        assert declaring.result(timeout=30).keep_days == 30
+    assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_rule") == 1

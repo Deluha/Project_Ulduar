@@ -59,6 +59,13 @@ class Config:
     path: Path
 
 
+def check_name(value: str, what: str) -> str:
+    """*value* when it is a project name or scope (`NAME_PATTERN`); otherwise `ValueError` naming it as the *what*."""
+    if not isinstance(value, str) or not NAME_PATTERN.fullmatch(value):
+        raise ValueError(f"The {what} {value!r} must match {NAME_PATTERN.pattern}")
+    return value
+
+
 def _table(parent: Mapping[str, Any], key: str, prefix: str, *, required: bool) -> Mapping[str, Any]:
     """The sub-table `key` of *parent*, `{}` when optional and absent."""
     dotted = prefix + key
