@@ -15,6 +15,7 @@ that run against the local test services — a PostgreSQL 18 server and an S3-co
 | `test_config.py` | `ulduar.config`: defaults, every unknown-key level, the version key, names, bounds, file errors | no |
 | `test_ids.py` | `ulduar._ids`: UUIDv7 bits, the millisecond round trip, ordering, the server's reading of the same id | db |
 | `test_db.py` | `ulduar._db`: the transport guard, the DSN variable, the opened connection, the statement, lock and budget limits, error translation by SQLSTATE | db |
+| `test_freya_ledger.py` | The schema ledger: every step applied to an empty database, no step applied twice, checksums, breaking steps, minimum library, concurrent installs, the ledger lock, step headers; what step 1 builds (roles, isolation, append-only, partitions) | db |
 | `test_check_conventions.py` | Convention rules C1–C9 on synthetic input, then the real repository | no |
 | `test_check_docs_sync.py` | The docs-sync classifier, token rules, git parsing | no |
 | `test_check_guidance_integrity.py` | Each guidance check on a miniature tree, then the real repository | no |

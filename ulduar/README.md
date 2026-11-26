@@ -4,7 +4,7 @@
 
 The importable package. It is generic: nothing here names a consumer or assumes a consumer's schema,
 folders or jobs (hard rule 1). Phase 1 adds the configuration file, the connection to the Archivum, the
-public exceptions and the record identifiers; the first component, Freya, follows.
+public exceptions, the record identifiers and the first component, Freya (`freya/README.md`).
 
 ## Files & entry points
 
@@ -15,6 +15,7 @@ public exceptions and the record identifiers; the first component, Freya, follow
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
+| `freya/` | Freya's facade, schema ledger and SQL steps |
 
 ## How it works
 
@@ -61,7 +62,7 @@ public exceptions and the record identifiers; the first component, Freya, follow
 - A database of its own, with a ledger login role, which owns the database and so
   the schema `ulduar`, and needs `CREATEROLE` (step 1 creates the group role `ulduar_recorder`), and one
   recording login role per project, created by the consumer. The recording roles hold `SELECT` and
-  `INSERT` only.
+  `INSERT` only (`freya/README.md`).
 
 ## Extending
 
@@ -70,4 +71,4 @@ Follow the adding-a-component workflow of the development skill
 
 ## See also
 
-`ROADMAP.md` · `.claude/skills/ulduar-development/references/architecture.md`
+`freya/README.md` · `ROADMAP.md` · `.claude/skills/ulduar-development/references/architecture.md`
