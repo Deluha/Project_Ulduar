@@ -72,6 +72,8 @@ credentials a consumer supplies at run time.
 | A downgrade, or two upgrades racing | The versioned-SQL ledger runs under an advisory lock, checks each step's checksum, and refuses a library older than the schema's minimum version |
 | A credential leaks | Configuration names environment variables, never values; no connection string appears in a log or an error |
 | Traffic is intercepted | A non-loopback host needs `verify-full` or `verify-ca` TLS |
+| A recording role creates partitions without end | `ensure_partitions` accepts only times from 15 years back to 2 years ahead, so a recorder can create at most a bounded set of monthly partitions |
+| Two Archivums share one server | The group role `ulduar_recorder` is cluster-wide: a recorder of one Archivum can read the other's schema ledger and call its partition function, while forced row-level security still hides every row; a second Archivum's ledger role needs ADMIN OPTION on the group. Give each Archivum its own server where that matters |
 | The supply chain is tampered with | A hashed dev-tool lock, test images pinned by digest, actions pinned by commit SHA, a weekly `pip-audit` and CodeQL run |
 
 Out of scope: a consumer's own systems (Ulduar reads them through read-only access only) and a

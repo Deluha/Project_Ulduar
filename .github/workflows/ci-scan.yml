@@ -7,9 +7,9 @@ name: ci-scan
 # fails the run and CodeQL's alerts appear under the repository's Security tab.
 # Not part of the `CI gate` of ci-tests.yml and not a required check: it runs on
 # the default branch only and a new advisory must not turn every open PR red. No
-# secret is used. pip-audit is pinned exactly (a new release's rules arrive as a
-# reviewed bump, not as a surprise failure); the CodeQL action is pinned by commit SHA
-# like every action here.
+# secret is used. pip-audit is pinned exactly in the dev extra and installed from the
+# hashed lock (a new release's rules arrive as a reviewed bump, not as a surprise
+# failure); the CodeQL action is pinned by commit SHA like every action here.
 on:
   schedule:
     - cron: "17 5 * * 1"
@@ -34,8 +34,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      - name: Install pip-audit
-        run: pip install pip-audit==2.10.1
+      - name: Install pip-audit from the hashed lock
+        run: pip install --require-hashes -r requirements/dev.lock
       # Reads the lock itself, in its own throwaway environment, hashes required.
       - name: Audit requirements/dev.lock
         run: pip-audit --require-hashes -r requirements/dev.lock
@@ -45,6 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read
       contents: read
       security-events: write
     steps:

@@ -35,6 +35,8 @@ dev = [
     "actionlint-py==1.7.12.25",
     # Compiles requirements/dev.lock (the hashed lock of this extra).
     "pip-tools>=7.4",
+    # Pinned exactly, like actionlint: ci-scan.yml installs it from the hashed lock.
+    "pip-audit==2.10.1",
 ]
 
 [tool.setuptools.packages.find]
