@@ -14,7 +14,7 @@ import os
 import secrets
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -43,8 +43,8 @@ from dev_tools.services import (
 from ulduar import _db, _ids
 from ulduar.config import ArchiveSettings, CredentialSettings, load_config
 from ulduar.config import Config as UlduarConfig
-from ulduar.freya import install, onboard_project, open_catalog
-from ulduar.hodir import Archive
+from ulduar.freya import Artifact, install, onboard_project, open_catalog
+from ulduar.hodir import Archive, open_archive
 from ulduar.hodir import _layout as hodir_layout
 from ulduar.hodir._store import open_store
 
@@ -606,3 +606,51 @@ def faulty_archive(config: UlduarConfig, **fault: Any) -> Iterator[tuple[Archive
 def object_key(scope: str = "default") -> str:
     """The key of the object `CONTENT` is stored under, for project `alpha`."""
     return hodir_layout.object_key("alpha", scope, CONTENT_CHECKSUM)
+
+
+def archive_file(config: UlduarConfig, source: Path) -> Artifact:
+    with open_archive(config) as session:
+        return session.put_file(source, "report")
+
+
+@pytest.fixture
+def tamper(config: UlduarConfig, request: pytest.FixtureRequest) -> Callable[[str, bytes | None], None]:
+    """Overwrite the stored object at a key with the given bytes, or remove it for None: the test's own tampering."""
+    settings = config.archive
+    assert settings is not None
+    if settings.backend == "directory":
+        assert settings.path is not None
+
+        def on_disk(key: str, data: bytes | None) -> None:
+            path = settings.path / settings.prefix / key  # type: ignore[operator]
+            if data is None:
+                path.unlink()
+            else:
+                path.chmod(0o644)
+                path.write_bytes(data)
+
+        return on_disk
+    client = request.getfixturevalue("s3_client")
+
+    def in_bucket(key: str, data: bytes | None) -> None:
+        full = f"{settings.prefix}/{key}"
+        if data is None:
+            client.delete_object(Bucket=settings.bucket, Key=full)
+        else:
+            client.put_object(Bucket=settings.bucket, Key=full, Body=data)
+
+    return in_bucket
+
+
+def record_confirmed_deletion(archivum: Archivum, artifact: Artifact) -> None:
+    """Record, as the test (a superuser), an intent and its confirmation for the content of *artifact*."""
+    insert = (
+        "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes, stage,"
+        " intent_id, cause) SELECT project_id, %s, %s, %s, %s, %s, %s, %s, 'incomplete_put'"
+        " FROM ulduar.project WHERE name = 'alpha'"
+    )
+    intent_id, outcome_id = _ids.uuid7(), _ids.uuid7()
+    with archivum.superuser() as su:
+        for deletion_id, stage, intent in ((intent_id, "intent", None), (outcome_id, "confirmed", intent_id)):
+            params = (deletion_id, _ids.uuid7_time(deletion_id), artifact.scope, artifact.checksum, artifact.size)
+            su.execute(insert, (*params, stage, intent))

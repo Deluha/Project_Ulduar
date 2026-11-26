@@ -25,14 +25,16 @@ from tests.conftest import (
     CONTENT_CHECKSUM,
     Archivum,
     Fault,
+    archive_file,
     faulty_archive,
     object_key,
     onboarded,
+    record_confirmed_deletion,
 )
 from ulduar import _ids
 from ulduar.config import Config
 from ulduar.errors import IntegrityError, UnknownRecordError
-from ulduar.freya import Artifact, open_catalog
+from ulduar.freya import open_catalog
 from ulduar.hodir import Archive, open_archive
 from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_store
 
@@ -45,35 +47,6 @@ def target(tmp_path: Path) -> Path:
     path = tmp_path / "target"
     path.mkdir()
     return path
-
-
-@pytest.fixture
-def tamper(config: Config, request: pytest.FixtureRequest) -> Callable[[str, bytes | None], None]:
-    """Overwrite the stored object at a key with the given bytes, or remove it for None: the test's own tampering."""
-    settings = config.archive
-    assert settings is not None
-    if settings.backend == "directory":
-        assert settings.path is not None
-
-        def on_disk(key: str, data: bytes | None) -> None:
-            path = settings.path / settings.prefix / key  # type: ignore[operator]
-            if data is None:
-                path.unlink()
-            else:
-                path.chmod(0o644)
-                path.write_bytes(data)
-
-        return on_disk
-    client = request.getfixturevalue("s3_client")
-
-    def in_bucket(key: str, data: bytes | None) -> None:
-        full = f"{settings.prefix}/{key}"
-        if data is None:
-            client.delete_object(Bucket=settings.bucket, Key=full)
-        else:
-            client.put_object(Bucket=settings.bucket, Key=full, Body=data)
-
-    return in_bucket
 
 
 class RacingStore:
@@ -91,34 +64,15 @@ class RacingStore:
         return self._store.read(key)
 
 
-def put(config: Config, source: Path) -> Artifact:
-    with open_archive(config) as session:
-        return session.put_file(source, "report")
-
-
 def leftovers(directory: Path) -> list[str]:
     return sorted(entry.name for entry in directory.iterdir())
-
-
-def record_confirmed_deletion(archivum: Archivum, artifact: Artifact) -> None:
-    """Record, as the test (a superuser), an intent and its confirmation for the content of *artifact*."""
-    insert = (
-        "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes, stage,"
-        " intent_id, cause) SELECT project_id, %s, %s, %s, %s, %s, %s, %s, 'incomplete_put'"
-        " FROM ulduar.project WHERE name = 'alpha'"
-    )
-    intent_id, outcome_id = _ids.uuid7(), _ids.uuid7()
-    with archivum.superuser() as su:
-        for deletion_id, stage, intent in ((intent_id, "intent", None), (outcome_id, "confirmed", intent_id)):
-            params = (deletion_id, _ids.uuid7_time(deletion_id), artifact.scope, artifact.checksum, artifact.size)
-            su.execute(insert, (*params, stage, intent))
 
 
 # --- the bytes come back exactly ---
 
 
 def test_an_archived_object_is_got_to_a_file_by_artifact_and_by_id(config: Config, source: Path, target: Path) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     with open_archive(config) as session:
         by_artifact = session.get(stored, target / "by-artifact.bin")
         by_id = session.get(stored.artifact_id, str(target / "by-id.bin"))
@@ -134,7 +88,7 @@ def test_an_archived_object_is_got_to_a_file_by_artifact_and_by_id(config: Confi
 def test_a_relative_destination_is_written_in_the_working_directory(
     config: Config, source: Path, target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     monkeypatch.chdir(target)
     with open_archive(config) as session:
         assert session.get(stored, "here.bin") == Path("here.bin")
@@ -147,7 +101,7 @@ def test_an_object_of_several_chunks_is_got_whole_to_a_file_and_to_a_stream(
     data = os.urandom(2 * CHUNK_SIZE + 17)
     big = tmp_path / "big.bin"
     big.write_bytes(data)
-    stored = put(config, big)
+    stored = archive_file(config, big)
     out = io.BytesIO()
     with open_archive(config) as session:
         assert session.get(stored, target / "big.bin").read_bytes() == data
@@ -156,7 +110,7 @@ def test_an_object_of_several_chunks_is_got_whole_to_a_file_and_to_a_stream(
 
 
 def test_a_stream_get_returns_the_size_and_writes_the_bytes(config: Config, source: Path) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     by_artifact, by_id = io.BytesIO(), io.BytesIO()
     with open_archive(config) as session:
         assert session.get_stream(stored, by_artifact) == len(CONTENT)
@@ -167,7 +121,7 @@ def test_a_stream_get_returns_the_size_and_writes_the_bytes(config: Config, sour
 def test_a_get_logs_the_artifact_the_short_checksum_and_the_size_but_no_destination(
     config: Config, source: Path, target: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     caplog.set_level(logging.INFO, logger="ulduar.hodir")
     with open_archive(config) as session:
         session.get(stored, target / "private-folder-name.bin")
@@ -199,7 +153,7 @@ def test_a_corrupted_object_is_an_integrity_error_and_no_file_or_partial_file_re
     data: bytes,
     problem: str,
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     tamper(object_key(), data)
     out = io.BytesIO()
     with open_archive(config) as session:
@@ -214,7 +168,7 @@ def test_a_corrupted_object_is_an_integrity_error_and_no_file_or_partial_file_re
 def test_an_object_removed_from_the_store_is_an_integrity_error(
     config: Config, source: Path, target: Path, tamper: Callable[[str, bytes | None], None]
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     tamper(object_key(), None)
     with open_archive(config) as session:
         with pytest.raises(IntegrityError):
@@ -230,7 +184,7 @@ def test_an_object_removed_from_the_store_is_an_integrity_error(
 def test_an_existing_destination_is_refused_before_any_read_and_left_as_it_was(
     config: Config, source: Path, target: Path
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     (target / "file.bin").write_bytes(b"mine")
     (target / "dangling").symlink_to(target / "nowhere")
     with faulty_archive(config) as (session, store):
@@ -247,7 +201,7 @@ def test_an_existing_destination_is_refused_before_any_read_and_left_as_it_was(
 def test_a_destination_without_an_existing_directory_to_hold_it_is_refused_before_any_read(
     config: Config, source: Path, target: Path
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     (target / "a-file").write_bytes(b"x")
     with faulty_archive(config) as (session, store):
         with pytest.raises(FileNotFoundError):
@@ -261,7 +215,7 @@ def test_a_destination_without_an_existing_directory_to_hold_it_is_refused_befor
 def test_a_destination_that_appears_during_the_get_is_not_replaced_and_no_partial_file_remains(
     config: Config, source: Path, target: Path
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     assert config.archive is not None
     with open_catalog(config) as catalog:
         racing = RacingStore(open_store(config.archive), target / "out.bin")
@@ -301,7 +255,7 @@ def test_an_unknown_id_is_an_unknown_record(config: Config, target: Path) -> Non
 def test_only_the_id_of_an_artifact_counts_the_recorded_checksum_size_and_scope_are_used(
     config: Config, source: Path, target: Path
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     forged = replace(stored, checksum=hashlib.sha256(b"other").digest(), size=5, scope="elsewhere")
     out = io.BytesIO()
     with faulty_archive(config) as (session, store):
@@ -321,7 +275,7 @@ def test_only_the_id_of_an_artifact_counts_the_recorded_checksum_size_and_scope_
 def test_an_artifact_of_another_project_is_not_recorded_in_this_one(
     config: Config, archivum: Archivum, source: Path, target: Path, tmp_path: Path
 ) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     other = replace(onboarded(archivum, tmp_path, "beta"), archive=config.archive)
     with open_archive(other) as session:
         for artifact in (stored, stored.artifact_id):
@@ -332,7 +286,7 @@ def test_an_artifact_of_another_project_is_not_recorded_in_this_one(
 def test_an_object_whose_deletion_was_confirmed_after_its_registration_is_not_in_the_archive_until_archived_again(
     config: Config, archivum: Archivum, source: Path, target: Path
 ) -> None:
-    first = put(config, source)
+    first = archive_file(config, source)
     record_confirmed_deletion(archivum, first)
     with open_archive(config) as session:
         for artifact in (first, first.artifact_id):
@@ -348,7 +302,7 @@ def test_an_object_whose_deletion_was_confirmed_after_its_registration_is_not_in
 
 
 def test_a_failure_after_the_partial_file_was_made_removes_it(config: Config, source: Path, target: Path) -> None:
-    stored = put(config, source)
+    stored = archive_file(config, source)
     with faulty_archive(config, method="read") as (session, _), pytest.raises(Fault):
         session.get(stored, target / "out.bin")
     assert leftovers(target) == []

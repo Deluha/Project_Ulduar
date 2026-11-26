@@ -5,16 +5,17 @@
 Hodir is the cold archive: immutable, content-addressed storage of files, database dumps, reports and models
 (hard rule 5). The package holds the storage interface and its two backends (a bucket on an S3-compatible server and
 a local directory), the object layout, and the public surface so far: `open_archive` with `put_file`, `put_stream`,
-`get` and `get_stream`. The verifying and retention calls arrive in later Phase 2 commits.
+`get`, `get_stream` and `verify`. The reconcile, rebuild and retention calls arrive in later Phase 2 commits.
 
 ## Files & entry points
 
 | File | Holds |
 |---|---|
-| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink` |
-| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`, `get`, `get_stream`) and `PutSink` |
+| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink`, `Verification`, `Finding` |
+| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`, `get`, `get_stream`, `verify`) and `PutSink` |
+| `_records.py` | Private: the records Hodir returns, `Finding` and `Verification` (re-exported by the facade), and `CHECK_OUTCOMES` |
 | `_layout.py` | Private: the one home of the object layout: the keys, the format marker, the layout text, the `Manifest` |
-| `_archivum.py` | Private: Hodir's SQL, the address lock, the registration insert and the archived check |
+| `_archivum.py` | Private: Hodir's SQL, the address lock, the registration insert, the archived check and the verification reads and writes |
 | `_store.py` | Private: the `WritingStore` and `DeletingStore` protocols, `StoredObject`, `UnfinishedUpload`, `open_store`, `check_key` (the one key validator), `check_size`, `part_size`, `open_regular` and the size constants |
 | `_directory.py` | Private: `DirectoryStore` and `DirectoryDeletingStore` |
 | `_s3.py` | Private: `S3Store` and `S3DeletingStore` on a boto3 client, the transport guard `check_endpoint`, the error translation |
@@ -99,6 +100,35 @@ type or another `format` is an `ArchiveFormatError` that names the problem and n
 - Each get logs one `info` line (`ulduar.hodir.archive`): the artifact id, the first 12 hex digits of the checksum
   and the size; never the destination, which may name a consumer's folder.
 
+### Verifying
+
+- `verify(*, sample=None, scope=None) -> Verification` re-reads objects and compares each with what the Archivum
+  records. `scope` defaults to the session's (`check_name`); `sample` is None for a full verification, else an
+  integer of at least 1 (a bool is refused): `ValueError` naming the argument, before any I/O.
+- The objects judged are the scope's *live addresses*: the distinct (checksum, size) of registrations whose artifact
+  is archived (`ulduar.artifact_is_archived`: registered, no confirmed deletion of the content recorded after it),
+  by checksum. A sample takes the N whose latest `passed` finding (by the database's clock) is oldest, those never
+  passed first, then by checksum, so repeated samples visit every object once before any is visited again, and an
+  object that fails stays at the front because a failure is not a pass.
+- Each address gets one outcome: `missing` (the store has no object, or it vanished between the head and the read:
+  after a store `IntegrityError` the head is asked again, and an absent object is `missing`), `not_immediate` (a
+  storage class that cannot be read now; the object is not read), `unreadable` (the store refused it as an
+  `IntegrityError`: a link or special file where the object belongs), `mismatch` (the SHA-256 or the size of the
+  bytes read differs from the record) or `passed`. The other three outcomes of `CHECK_OUTCOMES`
+  (`object_without_entry`, `entry_without_object`, `unfinished_upload`) belong to reconciliation (later commit).
+  `ArchiveUnavailable` propagates, and nothing is recorded. The read-hash loop is the one `get` uses.
+- The check id is made at the start; each finding id as its object is judged. At the end one catalog transaction
+  (with the check's and findings' times, so a missing monthly partition is made and the work run again) writes one
+  `archive_check` row (`kind` `verification`, `mode` `full` or `sample`, `objects_checked`, `findings` = the number
+  of outcomes other than `passed`) and one `archive_finding` row per judged address, `passed` ones included (the
+  rotation reads them). An empty scope, or one nothing was archived in (the check tables hold no foreign key to the
+  scopes), verifies 0 objects and still records the check.
+- `Verification(check_id, scope, mode, objects_checked, findings, event_at)` has a `failed` property (the findings
+  other than `passed`); `Finding(finding_id, scope, checksum, size, outcome)` holds the recorded checksum and size.
+  Both are frozen; they carry no content and no name.
+- Logs (`ulduar.hodir.archive`): one `info` summary (scope, mode, checked, failed) and one `warning` per finding
+  that is not `passed` with the first 12 hex digits of the checksum and the outcome.
+
 ### The storage interface
 
 - `open_store(settings, *, deleting=False)` chooses the backend from `[archive]` (`ulduar/README.md`) and returns a
@@ -152,8 +182,8 @@ type or another `format` is an `ArchiveFormatError` that names the problem and n
 ## Interfaces & contracts
 
 - Public: `open_archive(config)` (a context manager yielding `Archive`), `Archive.project`, `Archive.scope`,
-  `Archive.put_file(...)`, `Archive.put_stream(...)`, `PutSink` (`write`, `commit`), `Archive.get(...)` and
-  `Archive.get_stream(...)`, as described above.
+  `Archive.put_file(...)`, `Archive.put_stream(...)`, `PutSink` (`write`, `commit`), `Archive.get(...)`,
+  `Archive.get_stream(...)`, `Archive.verify(...)`, `Verification` and `Finding`, as described above.
   `Archive(catalog, store, settings)` is constructible directly (a test injects a wrapped store).
 - Private: `open_store`, `WritingStore`, `DeletingStore`, `StoredObject(key, size, modified, immediate)`,
   `UnfinishedUpload(key, upload_id, started)`, `check_key`, the `_layout` functions and `Manifest`.
@@ -164,7 +194,7 @@ type or another `format` is an `ArchiveFormatError` that names the problem and n
   for no `[archive]`, an unset variable a setting names, a missing directory, a refused endpoint, a missing
   `deleter` or a missing extra.
 - Library log lines (loggers `ulduar.hodir.*`): `info` per put and per get (`archive`), `debug` per stored object and deletion,
-  `warning` for a skipped link or a failed abort; none carries a credential or an address.
+  `warning` for a skipped link, a failed abort or a verification finding; none carries a credential or an address.
 
 ## Extending
 
@@ -174,4 +204,4 @@ to a writing class (hard rule 5); the object layout and checksum definition are 
 
 ## See also
 
-`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py` · `../../tests/test_hodir_get.py`
+`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py` · `../../tests/test_hodir_get.py` · `../../tests/test_hodir_verify.py`

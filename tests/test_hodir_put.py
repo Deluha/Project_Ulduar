@@ -231,7 +231,7 @@ def test_the_marker_is_canonical_and_checked() -> None:
 def test_the_facade_exports_exactly_the_session_surface() -> None:
     from ulduar import hodir
 
-    assert sorted(hodir.__all__) == ["Archive", "PutSink", "open_archive"]
+    assert sorted(hodir.__all__) == ["Archive", "Finding", "PutSink", "Verification", "open_archive"]
 
 
 # --- opening: the format marker ---

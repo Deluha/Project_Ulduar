@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 from uuid import UUID, uuid4
 
 from ulduar import _ids
@@ -34,6 +34,7 @@ from ulduar.errors import ConfigurationError, IntegrityError, UlduarError, Unkno
 from ulduar.freya import Artifact, Catalog, Connection, Dataset, Project, open_catalog
 from ulduar.freya.catalog import check_kind, check_origin
 from ulduar.hodir import _archivum, _layout
+from ulduar.hodir._records import PASSED, Finding, Verification
 from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_regular, open_store
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,19 @@ _SHORT_CHECKSUM_HEX = 12
 def _read_small(store: WritingStore, key: str) -> bytes:
     with store.read(key) as stream:
         return stream.read(_SMALL_OBJECT_LIMIT + 1)[:_SMALL_OBJECT_LIMIT]
+
+
+def _hash_object(store: WritingStore, key: str, write: Callable[[bytes], object] | None = None) -> tuple[bytes, int]:
+    """Read the object at *key* in chunks, hashing and counting them (and passing each to *write*); (digest, size)."""
+    digest = hashlib.sha256()
+    size = 0
+    with store.read(key) as stream:
+        while chunk := stream.read(CHUNK_SIZE):
+            digest.update(chunk)
+            size += len(chunk)
+            if write is not None:
+                write(chunk)
+    return digest.digest(), size
 
 
 def _ensure_format(store: WritingStore) -> None:
@@ -308,20 +322,78 @@ class Archive:
     def _read_verified(self, artifact: Artifact, write: Callable[[bytes], object]) -> int:
         """Pass the object's bytes to *write* chunk by chunk, hashing and counting them; verify at the end."""
         key = _layout.object_key(self.project.name, artifact.scope, artifact.checksum)
-        digest = hashlib.sha256()
-        size = 0
-        with self._store.read(key) as stream:
-            while chunk := stream.read(CHUNK_SIZE):
-                digest.update(chunk)
-                size += len(chunk)
-                write(chunk)
+        digest, size = _hash_object(self._store, key, write)
         if size != artifact.size:
             raise IntegrityError(f"Object {key} does not match its recorded size")
-        if digest.digest() != artifact.checksum:
+        if digest != artifact.checksum:
             raise IntegrityError(f"Object {key} does not match its recorded checksum")
         short = artifact.checksum.hex()[:_SHORT_CHECKSUM_HEX]
         logger.info("got artifact %s: %s, %d bytes", artifact.artifact_id, short, size)
         return size
+
+    def verify(self, *, sample: int | None = None, scope: str | None = None) -> Verification:
+        """Re-read the archived objects of *scope* (default: the session's), compare them with their records, record it.
+
+        Every live address of the scope (a registered object with no confirmed deletion after it) is judged:
+        `missing` (absent, or gone between the listing and the read), `not_immediate` (a storage class that
+        cannot be read now; not read), `unreadable` (a link or special file where the object belongs, or a read
+        the store refused as an `IntegrityError`), `mismatch` (the SHA-256 or the size differs) or `passed`.
+        With *sample* N (an integer of at least 1) only the N addresses whose latest passed finding is oldest are
+        judged, those never passed first, so repeated samples rotate through every object; otherwise all are.
+        One check and one finding per judged address are recorded in one catalog transaction at the end; an
+        `ArchiveUnavailable` propagates and records nothing. An empty scope records a check of 0 objects.
+        `ValueError` for a bad *sample* or *scope*, before any I/O.
+        """
+        scope = self.scope if scope is None else check_name(scope, "scope")
+        if sample is not None and (isinstance(sample, bool) or not isinstance(sample, int) or sample < 1):
+            raise ValueError(f"The sample {sample!r} must be an integer of at least 1")
+        project_id = self.project.project_id
+        check_id = _ids.uuid7()
+
+        def listing(tx: Connection) -> list[tuple[bytes, int]]:
+            if sample is None:
+                return _archivum.live_addresses(tx, project_id, scope)
+            return _archivum.sample_addresses(tx, project_id, scope, sample)
+
+        addresses = self._catalog.transaction(f"Listing the objects of scope {scope} to verify", listing)
+        findings = tuple(self._judge(scope, checksum, size) for checksum, size in addresses)
+        mode: Literal["full", "sample"] = "full" if sample is None else "sample"
+        check = Verification(check_id, scope, mode, len(findings), findings, _ids.uuid7_time(check_id))
+        times = [check.event_at, *(_ids.uuid7_time(finding.finding_id) for finding in findings)]
+        self._catalog.transaction(
+            f"Recording verification {check_id}",
+            lambda tx: _archivum.insert_check(tx, project_id, check),
+            event_ats=times,
+        )
+        logger.info("verified scope %s (%s): %d checked, %d failed", scope, mode, len(findings), len(check.failed))
+        return check
+
+    def _judge(self, scope: str, checksum: bytes, size: int) -> Finding:
+        key = _layout.object_key(self.project.name, scope, checksum)
+        outcome = self._outcome(key, checksum, size)
+        if outcome != PASSED:
+            logger.warning(
+                "verification of scope %s: object %s is %s", scope, checksum.hex()[:_SHORT_CHECKSUM_HEX], outcome
+            )
+        return Finding(_ids.uuid7(), scope, checksum, size, outcome)
+
+    def _outcome(self, key: str, checksum: bytes, size: int) -> str:
+        try:
+            stored = self._store.head(key)
+            if stored is None:
+                return "missing"
+            if not stored.immediate:
+                return "not_immediate"
+            digest, read = _hash_object(self._store, key)
+        except IntegrityError:  # the store refused: a link or special file in the way, or gone since the head
+            return "missing" if self._is_gone(key) else "unreadable"
+        return "passed" if digest == checksum and read == size else "mismatch"
+
+    def _is_gone(self, key: str) -> bool:
+        try:
+            return self._store.head(key) is None
+        except IntegrityError:
+            return False
 
     def _put(self, request: _Request, path: Path, size: int, sha256: bytes) -> Artifact:
         """Store *path* (*size* bytes hashing to *sha256*) and register it: object, manifest, artifact, registration."""
