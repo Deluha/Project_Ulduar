@@ -160,11 +160,12 @@ CREATE TABLE ulduar.redaction (
   PRIMARY KEY (project_id, redaction_id)
 );
 
--- recorded_at is the database's time: whatever an inserting role supplies is overwritten (the DEFAULT stays for
--- documentation; the trigger is what makes it true).
+-- recorded_at is the database's time, taken when the row is inserted (statement time, not the transaction's
+-- start): whatever an inserting role supplies is overwritten (the DEFAULT stays for documentation; the trigger
+-- is what makes it true).
 CREATE FUNCTION ulduar.stamp_recorded_at() RETURNS trigger LANGUAGE plpgsql
   SET search_path = pg_catalog AS
-$$ BEGIN NEW.recorded_at := now(); RETURN NEW; END $$;
+$$ BEGIN NEW.recorded_at := clock_timestamp(); RETURN NEW; END $$;
 CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.project FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
 CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.project_member FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
 CREATE TRIGGER stamp_recorded_at BEFORE INSERT ON ulduar.scope FOR EACH ROW EXECUTE FUNCTION ulduar.stamp_recorded_at();
@@ -211,7 +212,8 @@ CREATE TRIGGER refuse_truncate BEFORE TRUNCATE ON ulduar.redaction FOR EACH STAT
 -- concurrent callers all succeed; the result counts only the partitions this call made. for_time is bounded to
 -- [now() - 15 years, now() + 2 years], which keeps every partition name's year at four digits; outside it the
 -- call raises. TimeZone and DateStyle are pinned so the bounds never depend on the caller's session.
--- Each partition gets the refuse_truncate trigger (the parent's is not inherited).
+-- Each partition gets the refuse_truncate trigger (the parent's is not inherited). lineage_edge is done before
+-- artifact: CREATE ... PARTITION OF locks the parent, and that is the lock order of an edge recorder.
 CREATE FUNCTION ulduar.ensure_partitions(for_time timestamptz, months_ahead integer DEFAULT 3) RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
@@ -222,7 +224,7 @@ BEGIN
     RAISE EXCEPTION 'ulduar: partition time % is outside the window from 15 years ago to 2 years ahead', for_time;
   END IF;
   PERFORM pg_advisory_xact_lock(-6595867142526573570);
-  FOREACH t IN ARRAY ARRAY['artifact', 'lineage_edge'] LOOP
+  FOREACH t IN ARRAY ARRAY['lineage_edge', 'artifact'] LOOP
     FOR i IN 0..months_ahead LOOP
       m := date_trunc('month', for_time AT TIME ZONE 'UTC') + make_interval(months => i);
       part := t || '_' || to_char(m, 'YYYY_MM');
@@ -243,15 +245,17 @@ END
 $$;
 
 -- Drops the empty monthly partitions that ended on or before the given time; a partition holding any row stays.
--- The ledger role only (retention). Both parents are locked first, in the order a recorder takes its locks
--- (parent, then partition), which also locks every partition: no insert can land in a partition being dropped,
--- and no recorder holding a parent lock can deadlock with this function.
+-- The ledger role only (retention). Both parents are locked first, which also locks every partition: no insert
+-- can land in a partition being dropped. The order is lineage_edge, then artifact, the order of the only recorder
+-- that holds both (an edge insert locks lineage_edge, then its trigger reads artifact); every other recorder path
+-- touches one of the two, so none can deadlock with this function or with ensure_partitions, which creates
+-- partitions in the same order.
 CREATE FUNCTION ulduar.drop_empty_partitions(before timestamptz) RETURNS integer
   LANGUAGE plpgsql SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
 DECLARE p record; month_end timestamptz; has_rows boolean; dropped integer := 0;
 BEGIN
-  LOCK TABLE ulduar.artifact, ulduar.lineage_edge IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE ulduar.lineage_edge, ulduar.artifact IN ACCESS EXCLUSIVE MODE;
   FOR p IN
     SELECT c.relname::text AS part, parent.relname::text AS tbl
     FROM pg_inherits i

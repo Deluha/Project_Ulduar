@@ -17,6 +17,7 @@ from tests.conftest import (
     CHECKSUM,
     Archivum,
     count,
+    lineage_lock_name,
     ms_ago,
     old_artifacts,
     onboarded,
@@ -474,6 +475,35 @@ def test_retention_does_not_deadlock_with_a_recorder_that_holds_locks_and_reads_
     assert (result.history, result.rows) == ("artifact", 1)
     assert not partition_exists(archivum, "artifact", ms_ago(OLD_DAYS))
     assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 1
+
+
+def test_retention_does_not_deadlock_with_an_edge_recorder_waiting_for_its_project_lock(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    with open_catalog(config) as catalog:
+        child, parent = catalog.register_dataset("n", "child"), catalog.register_dataset("n", "parent")
+        lineage_lock = lineage_lock_name(catalog.project.project_id)
+    old_artifacts(config, OLD_DAYS)
+    declare_history_retention(config, "alpha", "artifact", 30)
+
+    def record_edge() -> int:
+        with open_catalog(config) as catalog:
+            return len(catalog.add_lineage(child, [parent]))
+
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=2) as pool:
+        holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lineage_lock,))
+        edge = pool.submit(record_edge)
+        wait_until_blocked(archivum)  # the edge holds its table lock and waits for the project's lineage lock
+        applying = pool.submit(apply_history_retention, config, dry_run=False)
+        wait_until_blocked(archivum, 2)  # retention's partition drop waits for that table lock
+        holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lineage_lock,))
+        # a deadlock ends one of the two with ArchivumUnavailable; a timeout fails the test instead of hanging it
+        assert edge.result(timeout=60) == 1
+        [result] = applying.result(timeout=60)
+    assert (result.history, result.rows) == ("artifact", 1)
+    assert not partition_exists(archivum, "artifact", ms_ago(OLD_DAYS))
+    assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 1
 
 
 @pytest.mark.parametrize("later_keep_days", [None, 1000])

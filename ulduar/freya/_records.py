@@ -130,10 +130,14 @@ def insert_with_partition_retry(
         if not _is_missing_partition(e):
             raise
     months = {(moment.year, moment.month): moment for moment in (at.astimezone(UTC) for at in event_ats)}
+    made: dict[tuple[int, int], int] = {}
     with _db.transaction(conn, settings) as tx:
-        for moment in months.values():
-            tx.execute(sql.SQL("SELECT {}(%s, 0)").format(qualified("ensure_partitions")), (moment,))
-    for year, month in months:
-        logger.info("created the time partitions for %04d-%02d", year, month)
+        for key, moment in months.items():
+            row = tx.execute(sql.SQL("SELECT {}(%s, 0)").format(qualified("ensure_partitions")), (moment,)).fetchone()
+            assert row is not None
+            made[key] = row[0]
+    for (year, month), partitions in made.items():
+        if partitions > 0:
+            logger.info("created %d time partition(s) for %04d-%02d", partitions, year, month)
     with _db.transaction(conn, settings) as tx:
         return insert(tx)

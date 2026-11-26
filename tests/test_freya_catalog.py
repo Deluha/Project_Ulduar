@@ -19,6 +19,7 @@ from tests.conftest import (
     count,
     digest,
     failure,
+    lineage_lock_name,
     ms_ago,
     onboarded,
     partition_exists,
@@ -200,7 +201,9 @@ def test_an_old_month_without_a_partition_is_created_and_the_insert_retried(
         assert catalog.get_artifact(old.artifact_id) == old
         assert catalog.register_artifact("log", CHECKSUM, 1, record_id=old.artifact_id) == old
     assert partition_exists(archivum, "artifact", long_ago)
-    assert sum("created the time partitions" in r.getMessage() for r in caplog.records) == 1
+    created = [r.getMessage() for r in caplog.records]
+    assert len(created) == 1 and created[0].startswith("created 2 time partition(s) for ")  # artifact and edge
+    assert _ids.uuid7_time(old.artifact_id).strftime("%Y-%m") in created[0]
 
 
 def test_a_driver_error_other_than_a_missing_partition_is_raised_as_the_package_error(
@@ -374,6 +377,39 @@ def test_two_recorders_meeting_the_same_missing_month_both_succeed(archivum: Arc
     assert partition_exists(archivum, "artifact", long_ago)
 
 
+def test_a_partition_made_while_an_edge_recorder_waits_does_not_deadlock_with_it(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path, lock_timeout_s=30)
+    with open_catalog(config) as catalog:
+        child, parent = catalog.register_dataset("n", "child"), catalog.register_dataset("n", "parent")
+        lineage_lock = lineage_lock_name(catalog.project.project_id)
+    long_ago = ms_ago(500)
+    assert not partition_exists(archivum, "artifact", long_ago)
+
+    def record_edge() -> int:
+        with open_catalog(config) as catalog:
+            return len(catalog.add_lineage(child, [parent]))
+
+    def register_old_artifact() -> uuid.UUID:
+        with open_catalog(config) as catalog:
+            return catalog.register_artifact("log", CHECKSUM, 1, record_id=_ids.uuid7(long_ago)).artifact_id
+
+    with archivum.superuser() as holder, ThreadPoolExecutor(max_workers=2) as pool:
+        holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lineage_lock,))
+        edge = pool.submit(record_edge)
+        wait_until_blocked(archivum)  # the edge holds its table lock and waits for the project's lineage lock
+        registering = pool.submit(register_old_artifact)
+        wait_until_blocked(archivum, 2)  # the partition call waits for that table lock
+        holder.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lineage_lock,))
+        # a deadlock ends one of the two with ArchivumUnavailable; a timeout fails the test instead of hanging it
+        assert edge.result(timeout=60) == 1
+        registering.result(timeout=60)
+    assert partition_exists(archivum, "artifact", long_ago)
+    assert count(archivum, "SELECT count(*) FROM ulduar.lineage_edge") == 1
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 1
+
+
 @pytest.mark.parametrize("unix_ms", [ms_ago(365 * 16), ms_ago(-365 * 3)], ids=["too old", "too far ahead"])
 def test_a_record_outside_the_partition_window_is_a_package_error(
     archivum: Archivum, tmp_path: Path, unix_ms: int
@@ -417,12 +453,13 @@ def test_a_recorder_cannot_set_recorded_at(archivum: Archivum, tmp_path: Path) -
         (
             "INSERT INTO ulduar.artifact (project_id, scope, artifact_id, event_at, recorded_at, kind,"
             " checksum_algorithm, checksum, size_bytes) VALUES (%s, 'default', %s, %s, '2001-01-01', 'log', 'sha256',"
-            " %s, 1) RETURNING recorded_at = now(), recorded_at",
+            " %s, 1) RETURNING recorded_at BETWEEN now() AND clock_timestamp(), recorded_at",
             (project_id, artifact_id, _ids.uuid7_time(artifact_id), CHECKSUM),
         ),
         (
             "INSERT INTO ulduar.dataset (project_id, scope, dataset_id, namespace, name, event_at, recorded_at)"
-            " VALUES (%s, 'default', %s, 'n', 'n', %s, '2001-01-01') RETURNING recorded_at = now(), recorded_at",
+            " VALUES (%s, 'default', %s, 'n', 'n', %s, '2001-01-01')"
+            " RETURNING recorded_at BETWEEN now() AND clock_timestamp(), recorded_at",
             (project_id, dataset_id, _ids.uuid7_time(dataset_id)),
         ),
     ]

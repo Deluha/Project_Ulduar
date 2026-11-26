@@ -24,13 +24,14 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 ## How it works
 
 - A step is a file `steps/NNNN_<name>.sql`, numbered 1..N without a gap, never edited once released (a new
-  step corrects it; step 1 was edited in place once, before its release, with the owner's approval). Its leading comment lines hold two required headers: `-- ulduar-kind: additive|breaking`
-  and `-- ulduar-min-library: X.Y.Z` (the lowest library release that still works once the step is applied).
+  step corrects it; step 1 was edited in place once, before its release, with the owner's approval). Its leading
+  comment lines hold two required headers: `-- ulduar-kind: additive|breaking` and
+  `-- ulduar-min-library: X.Y.Z` (the lowest library release that still works once the step is applied).
   The ledger records, per applied step: number, name, kind, the SHA-256 of the file, the minimum library
   version, the applying library version and the time (`ulduar.schema_ledger`).
-- `install(config, *, allow_breaking=False)` runs as the ledger role, in one transaction with transaction-scoped time limits: take
-  the advisory lock `LEDGER_LOCK_KEY` (a lock timeout is a `LedgerError`; a second install waits, then finds
-  nothing pending), create schema `ulduar` and the ledger table if absent (the bootstrap, the only DDL
+- `install(config, *, allow_breaking=False)` runs as the ledger role, in one transaction with transaction-scoped
+  time limits: take the advisory lock `LEDGER_LOCK_KEY` (a lock timeout is a `LedgerError`; a second install
+  waits, then finds nothing pending), create schema `ulduar` and the ledger table if absent (the bootstrap, the only DDL
   outside a step), verify the checksum of every applied step, refuse a recorded minimum library version above
   this library's or an unknown applied breaking step, refuse a pending breaking step without
   `allow_breaking=True` (nothing is applied), apply each pending step in order and record it, then
@@ -70,7 +71,8 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 
 - Every id is a UUIDv7 whose time equals the row's `event_at` (a CHECK). `recorded_at` is the database's time: a
   `BEFORE INSERT` trigger (`stamp_recorded_at`) on every table that has it overwrites whatever the inserting role
-  supplies with `now()` (the transaction's start).
+  supplies with `clock_timestamp()` (the time of the insert, not the transaction's start). So among declares
+  serialised by the retention lock, the one that commits last has the latest `recorded_at` and wins.
 - Row-level security is enabled and forced on every keyed table. The ledger role passes the `ledger_all`
   policy; a recording role sees and inserts only rows of the project it belongs to (`project_member`).
 - Append-only: triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the six history tables unless the ledger
@@ -91,7 +93,10 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   the library's partition retry surfaces a `UlduarError`), which keeps the year at four digits. Both
   functions pin `TimeZone` to UTC and `DateStyle` to ISO, so the bounds never depend on the caller's session.
   `drop_empty_partitions` first locks both parent tables (`ACCESS EXCLUSIVE`, which locks every partition
-  too), the order a recorder takes its locks, so it cannot deadlock with a recorder holding a parent lock.
+  too), `lineage_edge` before `artifact`, and `ensure_partitions` makes its partitions in the same order
+  (`CREATE ... PARTITION OF` locks the parent). That is the order of the only recorder that holds both: an edge
+  insert locks `lineage_edge`, then its trigger reads `artifact`; every other recorder path touches one of the
+  two. So neither function can deadlock with a recorder.
 
 ### The catalog session
 
@@ -143,10 +148,11 @@ transaction each after `ledger.check_schema`; `history.py` is the only code that
 against history, each only inside the maintenance setting `ulduar.maintenance` (`set_config(..., true)`, so it
 ends with the transaction).
 
-- `onboard_project` reuses the project of that name or creates it (UUIDv7 id), adds the scopes
-  (a sequence of names; one bare string is a `ValueError`; `ON CONFLICT DO NOTHING`), records the login role as a member and grants it `ulduar_recorder`. A login role
-  belongs to one project: one already in another raises `UlduarError` naming role and project and keeps
-  nothing; one that does not exist raises `UnknownRecordError`. Repeating it changes nothing.
+- `onboard_project` reuses the project of that name or creates it (UUIDv7 id), adds the scopes (a sequence of
+  names; one bare string is a `ValueError`; `ON CONFLICT DO NOTHING`), records the login role as a member and
+  grants it `ulduar_recorder`. A login role belongs to one project: one already in another raises `UlduarError`
+  naming role and project and keeps nothing; one that does not exist raises `UnknownRecordError`. Repeating it
+  changes nothing.
 - `declare_history_retention` appends a rule for a project and history (`artifact`, `lineage_edge`); the rule
   recorded last wins; `keep_days=None` keeps for ever (also the state when no rule exists). Nothing is removed.
   It takes the advisory lock of its (project, history) pair (`history.retention_lock_name`) first.
@@ -184,8 +190,8 @@ ends with the transaction).
   - `get_artifact(artifact_id) -> Artifact` (`UnknownRecordError`); `find_artifacts(*, checksum=None,
     kind=None, dataset=None, scope=None) -> list[Artifact]`, ordered by `event_at, artifact_id`.
   - `namespace` 1 to 200 and `name` 1 to 500 characters; `scope` matches `NAME_PATTERN`.
-  - `add_lineage(child, parents, *, run_id=None, record_ids=None) -> list[LineageEdge]`; `ancestors(node, *, max_depth=None)` and
-    `descendants(node, *, max_depth=None) -> list[LineageNode]`.
+  - `add_lineage(child, parents, *, run_id=None, record_ids=None) -> list[LineageEdge]`;
+    `ancestors(node, *, max_depth=None)` and `descendants(node, *, max_depth=None) -> list[LineageNode]`.
 - Records (frozen): `LineageEdge(edge_id, child, parent, run_id, event_at, recorded_at)`; `LineageNode(ref,
   depth)`; `Project(project_id, name)`; `NodeRef(kind, id)`; `Dataset(dataset_id, project_id, scope,
   namespace, name, event_at, recorded_at)` and `Artifact(artifact_id, project_id, scope, kind, checksum, size,
@@ -200,7 +206,7 @@ ends with the transaction).
 - Exceptions: `ConfigurationError`, `SchemaVersionError`, `LedgerError`, `ArchivumUnavailable` and the other
   members of `ulduar.errors`.
 - Library log lines (loggers `ulduar.freya.*`, no handler of their own): `info` per applied step
-  (`ledger`), per created partition month (`_records`), per onboarding, retention action and redaction
+  (`ledger`), per partition-creating call that made at least one (`_records`, with the count), per onboarding, retention action and redaction
   (`history`); none carries a connection string, a password or a recorded value.
 
 ## Extending

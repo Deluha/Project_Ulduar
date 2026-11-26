@@ -13,7 +13,7 @@ public exceptions, the record identifiers and the first component, Freya (`freya
 | `__init__.py` | `__version__`, read from the installed distribution's metadata |
 | `config.py` | `load_config` and the frozen `Config`, `ProjectSettings`, `ArchivumSettings`; `NAME_PATTERN`, the one definition of a project name or scope |
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
-| `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation |
+| `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation (`translate`, `translated`, `translated_transaction`) |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
 | `freya/` | Freya's facade, schema ledger, SQL steps, catalog session, lineage and the ledger-role history calls (`freya/README.md`) |
 
@@ -29,11 +29,13 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   used only to install and upgrade the schema, onboard a project and declare, apply and redact history.
 - `_db.open_connection` reads the variable, refuses a non-loopback host unless `sslmode` is `verify-full`
   or `verify-ca` (reading what libpq falls back to when the string leaves it out: `PGHOST`, `PGHOSTADDR`,
-  `PGSSLMODE`; a connection service, in the string or through `PGSERVICE` / `PGSERVICEFILE`, is refused), opens one connection (no pool, no prepared statements) and refuses a server that is not
-  PostgreSQL 18. `_db.transaction` wraps one transaction and sets `statement_timeout`, `lock_timeout` and
-  `transaction_timeout` for it alone (`set_config(..., true)`), so the limits survive a connection pooler.
+  `PGSSLMODE`; a connection service, in the string or through `PGSERVICE` / `PGSERVICEFILE`, is refused), opens
+  one connection (no pool, no prepared statements) pinned to READ COMMITTED whatever the role or database
+  defaults to (the lineage cycle guard relies on it), and refuses a server that is not PostgreSQL 18.
+  `_db.transaction` wraps one transaction and sets `statement_timeout`, `lock_timeout` and `transaction_timeout`
+  for it alone (`set_config(..., true)`), so the limits survive a connection pooler.
   `_db.translate` turns a driver error into a package exception by SQLSTATE; `_db.translated(what)` does it for
-  a block.
+  a block and `_db.translated_transaction(conn, settings, what)` for a transaction.
 - Time limits, in seconds (default, range): connect 10 (1–60), statement 30 (1–600), lock 5 (1–60), total
   budget per call 60 (1–3600). A limit that is hit raises `ArchivumUnavailable`.
 - Record ids are UUIDv7 made by the client; a record's `event_at` is the time inside its id.
@@ -44,9 +46,10 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   installed.
 - `ulduar.config`: `load_config(path="ulduar.toml") -> Config`, `Config(project, archivum, path)`,
   `ProjectSettings(name, scope="default")`, `ArchivumSettings(dsn_env, ledger_dsn_env=None, connect_timeout_s=10,
-  statement_timeout_s=30, lock_timeout_s=5, call_budget_s=60)`, `NAME_PATTERN`, `CONFIG_VERSION`.
+  statement_timeout_s=30, lock_timeout_s=5, call_budget_s=60)`, `NAME_PATTERN`, `CONFIG_VERSION`,
+  `check_name(value, what) -> str` (the name check; raises `ValueError`).
 - `ulduar.errors`: `UlduarError`; `ConfigurationError`; `ArchivumUnavailable` (no connection, a timeout, the
-  call budget, a lost connection); `SchemaVersionError` (not installed, schema too new or too old,
+  call budget, a lost connection, a deadlock (40P01) or a serialization failure (40001)); `SchemaVersionError` (not installed, schema too new or too old,
   unsupported server); `LedgerError` (changed step, breaking step without its flag, ledger lock);
   `UnknownRecordError`; `LineageCycleError`; `IsolationError` (refused by row-level security or privileges).
   A message names the object (project, variable, step, host) and never a connection string, a password or a
