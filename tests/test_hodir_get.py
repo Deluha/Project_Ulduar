@@ -8,6 +8,7 @@ refusal happens before any read, and makes a destination appear while a get is r
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import logging
@@ -33,7 +34,7 @@ from tests.conftest import (
 )
 from ulduar import _ids
 from ulduar.config import Config
-from ulduar.errors import IntegrityError, UnknownRecordError
+from ulduar.errors import IntegrityError, UlduarError, UnknownRecordError
 from ulduar.freya import open_catalog
 from ulduar.hodir import Archive, open_archive
 from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_store
@@ -116,6 +117,25 @@ def test_a_stream_get_returns_the_size_and_writes_the_bytes(config: Config, sour
         assert session.get_stream(stored, by_artifact) == len(CONTENT)
         assert session.get_stream(stored.artifact_id, by_id) == len(CONTENT)
     assert by_artifact.getvalue() == by_id.getvalue() == CONTENT
+
+
+class FullDisk(io.RawIOBase):
+    """A destination whose every write fails as a full disk does."""
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_a_destination_that_fails_to_write_surfaces_as_the_callers_oserror(config: Config, source: Path) -> None:
+    stored = archive_file(config, source)
+    with open_archive(config) as session:
+        with pytest.raises(OSError, match="No space left on device") as caught:
+            session.get_stream(stored, FullDisk())  # type: ignore[arg-type]
+    assert caught.value.errno == errno.ENOSPC
+    assert not isinstance(caught.value, UlduarError)  # not the store's ArchiveUnavailable
 
 
 def test_a_get_logs_the_artifact_the_short_checksum_and_the_size_but_no_destination(

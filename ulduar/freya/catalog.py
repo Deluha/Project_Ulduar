@@ -18,12 +18,22 @@ from uuid import UUID
 from psycopg import sql
 
 from ulduar import _db, _ids
+from ulduar._schema import (
+    CHECKSUM_ALGORITHM,
+    NAME_MAX,
+    NAMESPACE_MAX,
+    Connection,
+    check_checksum,
+    check_kind,
+    check_origin,
+    check_text,
+    qualified,
+)
 from ulduar.config import ArchivumSettings, Config, check_name
 from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import ledger, lineage
 from ulduar.freya._records import (
     Artifact,
-    Connection,
     Dataset,
     LineageEdge,
     LineageNode,
@@ -31,16 +41,7 @@ from ulduar.freya._records import (
     Project,
     Result,
     insert_with_partition_retry,
-    qualified,
 )
-
-# The rows of `ulduar.artifact_kind` (step 1 is the schema's home; a test holds the two equal).
-ARTIFACT_KINDS = ("raw_file", "database_dump", "report", "model", "log")
-CHECKSUM_ALGORITHM = "sha256"
-CHECKSUM_BYTES = 32
-NAMESPACE_MAX = 200
-NAME_MAX = 500
-ORIGIN_MAX = 1000
 
 _PROJECT = qualified("project")
 _SCOPE = qualified("scope")
@@ -81,33 +82,6 @@ _SELECT_ARTIFACT = sql.SQL("SELECT {columns} FROM {table} WHERE project_id = %s 
     table=_ARTIFACT, columns=_ARTIFACT_COLUMNS
 )
 _FIND_ARTIFACTS = sql.SQL("SELECT {columns} FROM {table} WHERE {conditions} ORDER BY event_at, artifact_id")
-
-
-def _check_text(argument: str, value: str | None, limit: int, *, required: bool = True) -> None:
-    """*value* is a string of 1 to *limit* characters (or None when not *required*); the message names the length."""
-    if value is None and not required:
-        return
-    if not isinstance(value, str) or not 1 <= len(value) <= limit:
-        found = f"{len(value)} characters" if isinstance(value, str) else f"a {type(value).__name__}"
-        raise ValueError(f"The {argument} must be a string of 1 to {limit} characters, got {found}")
-
-
-def check_kind(kind: str) -> None:
-    """`ValueError` unless *kind* is one of `ARTIFACT_KINDS`."""
-    if kind not in ARTIFACT_KINDS:
-        raise ValueError(f"Artifact kind {kind!r} is not one of {', '.join(ARTIFACT_KINDS)}")
-
-
-def check_checksum(checksum: bytes) -> None:
-    """`ValueError` unless *checksum* is a SHA-256 digest of `CHECKSUM_BYTES` bytes."""
-    if not isinstance(checksum, bytes) or len(checksum) != CHECKSUM_BYTES:
-        found = f"{len(checksum)} bytes" if isinstance(checksum, bytes) else f"a {type(checksum).__name__}"
-        raise ValueError(f"The checksum must be a SHA-256 digest of {CHECKSUM_BYTES} bytes, got {found}")
-
-
-def check_origin(origin: str | None) -> None:
-    """`ValueError` unless *origin* is None or a string of 1 to `ORIGIN_MAX` characters."""
-    _check_text("origin", origin, ORIGIN_MAX, required=False)
 
 
 def _check_artifact(kind: str, checksum: bytes, size: int, origin: str | None) -> None:
@@ -165,8 +139,8 @@ class Catalog:
 
     def register_dataset(self, namespace: str, name: str, *, scope: str | None = None) -> Dataset:
         """Register the dataset *namespace*/*name* in the scope; registering it again returns the existing one."""
-        _check_text("namespace", namespace, NAMESPACE_MAX)
-        _check_text("name", name, NAME_MAX)
+        check_text("namespace", namespace, NAMESPACE_MAX)
+        check_text("name", name, NAME_MAX)
         scope = self._scope(scope)
         dataset_id = _ids.uuid7()
         params = (self.project.project_id, scope, dataset_id, namespace, name, _ids.uuid7_time(dataset_id))

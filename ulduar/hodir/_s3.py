@@ -5,8 +5,9 @@ Input: the `ArchiveSettings` of an `s3` archive and the environment variables it
 overwritten: a put is conditional (`If-None-Match: *`), and every body travels with its SHA-256 so the store itself
 refuses a wrong one. The writing store holds the writer's credential and has no delete call; the deleting store
 holds the deleter's (hard rule 5). Private: reached through `open_store` only. No message or log line built here
-carries a key, secret or token, an endpoint or a proxy address (hard rule 11): a failure is worded with the
-operation, the object key and the error code or class name only.
+carries a credential, a proxy address or a full endpoint URL (hard rule 11): a failure is worded with the
+operation, the object key and the error code or class name only. Only `check_endpoint` names a host (never a
+credential), as `_db` names the Archivum's.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ CONNECT_TIMEOUT_S = 10
 READ_TIMEOUT_S = 60
 MAX_ATTEMPTS = 3
 COLD_STORAGE_CLASSES = {"GLACIER", "DEEP_ARCHIVE"}
+# The archive tiers of INTELLIGENT_TIERING, which `head_object` reports as `ArchiveStatus`, not as a storage class.
+COLD_ARCHIVE_STATUSES = {"ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS"}
 # What a store answers when a conditional put finds the key taken, and when it refuses a body's checksum.
 _PRECONDITION_FAILED = {"PreconditionFailed"}
 _CHECKSUM_REFUSED = {"XAmzContentChecksumMismatch", "BadDigest"}
@@ -76,6 +79,11 @@ def _translated(operation: str, key: str) -> Iterator[None]:
         raise ArchiveUnavailable(f"{operation} {key} failed: {type(e).__name__}") from None
 
 
+def is_immediate(storage_class: str | None, archive_status: str | None = None) -> bool:
+    """False when the object is in a cold storage class or an archive tier: it must be restored before it is read."""
+    return storage_class not in COLD_STORAGE_CLASSES and archive_status not in COLD_ARCHIVE_STATUSES
+
+
 class S3Store:
     """A writing store over one bucket and the key prefix *prefix* inside it (the store's own root)."""
 
@@ -97,8 +105,10 @@ class S3Store:
         return full + "/" if full else ""
 
     @staticmethod
-    def _stored(key: str, size: int, modified: Any, storage_class: str | None) -> StoredObject:
-        return StoredObject(key, size, modified.astimezone(UTC), storage_class not in COLD_STORAGE_CLASSES)
+    def _stored(
+        key: str, size: int, modified: Any, storage_class: str | None, archive_status: str | None = None
+    ) -> StoredObject:
+        return StoredObject(key, size, modified.astimezone(UTC), is_immediate(storage_class, archive_status))
 
     def put_new(self, key: str, source: Path, size: int, sha256: bytes) -> bool:
         check_key(key)
@@ -134,7 +144,7 @@ class S3Store:
             if _precondition_failed(e):
                 return False
             raise
-        logger.debug("Stored object %s (%d bytes)", key, size)
+        logger.debug("stored object %s (%d bytes)", key, size)
         return True
 
     def _put_multipart(self, key: str, handle: BinaryIO, size: int, sha256: bytes) -> bool:
@@ -159,7 +169,7 @@ class S3Store:
         except BaseException:
             self._abort(key, full, upload_id)
             raise
-        logger.debug("Stored object %s (%d bytes) in %d parts", key, size, len(parts))
+        logger.debug("stored object %s (%d bytes) in %d parts", key, size, len(parts))
         return True
 
     def _upload_parts(self, full: str, upload_id: str, handle: BinaryIO, size: int, sha256: bytes) -> _Parts:
@@ -194,7 +204,7 @@ class S3Store:
             self._client.abort_multipart_upload(Bucket=self._bucket, Key=full, UploadId=upload_id)
         except (ClientError, BotoCoreError) as e:
             reason = _code(e) if isinstance(e, ClientError) else type(e).__name__
-            logger.warning("Aborting the unfinished upload of %s failed: %s", key, reason)
+            logger.warning("aborting the unfinished upload of %s failed: %s", key, reason)
 
     def head(self, key: str) -> StoredObject | None:
         check_key(key)
@@ -205,7 +215,13 @@ class S3Store:
                 if _code(e) in _MISSING_OBJECT:
                     return None
                 raise
-            return self._stored(key, response["ContentLength"], response["LastModified"], response.get("StorageClass"))
+            return self._stored(
+                key,
+                response["ContentLength"],
+                response["LastModified"],
+                response.get("StorageClass"),
+                response.get("ArchiveStatus"),
+            )
 
     def read(self, key: str) -> AbstractContextManager[BinaryIO]:
         check_key(key)
@@ -274,7 +290,7 @@ class S3DeletingStore(S3Store):
                 self._client.delete_object(Bucket=self._bucket, Key=full)
             for item in versions:
                 self._client.delete_object(Bucket=self._bucket, Key=full, VersionId=item["VersionId"])
-        logger.debug("Deleted every version of object %s", key)
+        logger.debug("deleted every version of object %s", key)
 
     def any_version_left(self, key: str) -> bool:
         check_key(key)

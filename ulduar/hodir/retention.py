@@ -21,10 +21,10 @@ from typing import get_args
 from uuid import UUID
 
 from ulduar import _ids
+from ulduar._schema import lookup_project_id
 from ulduar.config import Config, check_name
 from ulduar.errors import ConfigurationError, UlduarError
 from ulduar.freya import Catalog, Connection, Project, ledger_transaction, open_catalog
-from ulduar.freya.history import lookup_project_id
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._deletion import delete_address, manifest_keys
 from ulduar.hodir._records import (

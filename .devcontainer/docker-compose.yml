@@ -1,6 +1,6 @@
 # Dev container services. The images (tag and digest) must equal the ones in dev_tools/services.py
 # (tests/test_services.py checks it). The credentials are throwaways for local
-# instances that hold no data. `app` and `s3` share the `db` network namespace, so
+# instances that hold no data. `app`, `s3` and `s3-provision` share the `db` network namespace, so
 # PostgreSQL is on 127.0.0.1:5432, MinIO on 127.0.0.1:9000, and the fixtures'
 # local-host guards hold.
 services:

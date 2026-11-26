@@ -110,6 +110,7 @@ CREATE FUNCTION ulduar.artifact_is_archived(p uuid, a uuid) RETURNS boolean LANG
 $$ SELECT EXISTS (
      SELECT FROM ulduar.archive_registration r
      JOIN ulduar.artifact x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id
+                           AND x.event_at = r.event_at   -- the registration carries it: partition pruning
      WHERE r.project_id = p AND r.artifact_id = a
        AND NOT EXISTS (
          SELECT FROM ulduar.archive_deletion d
@@ -142,9 +143,10 @@ ALTER TABLE ulduar.history_retention_rule DROP CONSTRAINT history_retention_rule
 
 -- Step 1's partition functions, replaced to cover the two new partitioned tables (CREATE OR REPLACE keeps their
 -- grants). Callers serialise on the same advisory lock as before. Creating a partition locks its parent, so the
--- lock order of every path is lineage_edge, artifact, archive_check, archive_finding, then {dataset, scope,
--- artifact_kind} (the cloned foreign keys of an artifact partition). archive_registration is in no such path:
--- a registration insert reads artifact but the partition functions never lock the registration table.
+-- lock order of every path is lineage_edge, artifact, then {dataset, scope, artifact_kind} (the foreign keys cloned
+-- onto an artifact partition, locked while it is made), then archive_check, archive_finding. archive_registration
+-- is in no such path: a registration insert reads artifact but the partition functions never lock the registration
+-- table.
 CREATE OR REPLACE FUNCTION ulduar.ensure_partitions(for_time timestamptz, months_ahead integer DEFAULT 3) RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, ulduar SET TimeZone = 'UTC' SET DateStyle = 'ISO' AS
 $$
@@ -178,7 +180,7 @@ $$;
 -- Drops the empty monthly partitions that ended on or before the given time; a partition holding any row stays.
 -- The ledger role only (retention). The four parents are locked first, which also locks every partition: no
 -- insert can land in a partition being dropped. The order is lineage_edge, artifact, archive_check,
--- archive_finding, the lock order of ensure_partitions; every path takes them in that order, or touches only one
+-- archive_finding, the order in which ensure_partitions takes those four; every path takes them in that order, or touches only one
 -- of them in a transaction (a recorder's other inserts; the dry run of retention counts each history in a
 -- transaction of its own).
 CREATE OR REPLACE FUNCTION ulduar.drop_empty_partitions(before timestamptz) RETURNS integer

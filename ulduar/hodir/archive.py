@@ -30,10 +30,10 @@ from typing import BinaryIO, Literal
 from uuid import UUID, uuid4
 
 from ulduar import _ids
+from ulduar._schema import check_kind, check_origin
 from ulduar.config import ArchiveSettings, Config, check_name
 from ulduar.errors import ConfigurationError, IntegrityError, UlduarError, UnknownRecordError
 from ulduar.freya import Artifact, Catalog, Connection, Dataset, Project, open_catalog
-from ulduar.freya.catalog import check_kind, check_origin
 from ulduar.hodir import _archivum, _layout, _rebuild, _reconcile
 from ulduar.hodir._records import PASSED, Finding, Rebuild, Reconciliation, Verification
 from ulduar.hodir._registration import register_object

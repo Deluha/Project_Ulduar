@@ -28,7 +28,7 @@ explicit removal of an object archived by mistake.
 | `_archivum.py` | Private: Hodir's SQL, the locks, the registration insert, the archived check, the scope check, the check and retention reads and writes, the deletion rows, and the reads the sweep and a rebuild make (the three kinds of record, a dataset by id, the project's scopes) |
 | `_store.py` | Private: the `WritingStore` and `DeletingStore` protocols, `StoredObject`, `UnfinishedUpload(key, upload_id, started)`, `open_store`, `read_small`, `check_key` (the one key validator), `check_size`, `part_size`, `open_regular` and the size constants |
 | `_directory.py` | Private: `DirectoryStore` and `DirectoryDeletingStore` |
-| `_s3.py` | Private: `S3Store` and `S3DeletingStore` on a boto3 client, the transport guard `check_endpoint`, the error translation |
+| `_s3.py` | Private: `S3Store` and `S3DeletingStore` on a boto3 client, the transport guard `check_endpoint`, `is_immediate` (cold storage classes and archive tiers), the error translation |
 
 ## How it works
 
@@ -142,7 +142,7 @@ A manifest's `kind` must be one of the artifact kinds.
 - Each address gets one outcome: `missing` (the store has no object, or it vanished between the head and the read:
   after a store `IntegrityError` the head is asked again, and an absent object is `missing`), `not_immediate` (a
   storage class that cannot be read now; the object is not read), `unreadable` (the store refused it as an
-  `IntegrityError`: a link or special file where the object belongs), `mismatch` (the SHA-256 or the size of the
+  `IntegrityError`: a directory, link or special file where the object belongs), `mismatch` (the SHA-256 or the size of the
   bytes read differs from the record) or `passed`. The other three outcomes of `CHECK_OUTCOMES`
   (`object_without_entry`, `entry_without_object`, `unfinished_upload`) belong to reconciliation (below).
   `ArchiveUnavailable` propagates, and nothing is recorded. The read-hash loop is the one `get` uses.
@@ -369,15 +369,18 @@ session's connection (`Catalog.transaction`, the recording role); the credential
 - Directory backend: a file is written to `.tmp-<hex>` beside its final name, flushed, hard-linked into place
   and the temporary removed, so the final name never holds a partial file and an existing name is never
   replaced. No symbolic link below the root is followed (each segment is opened relative to its parent with
-  `O_NOFOLLOW`); a link or special file where an object belongs is an `IntegrityError`, and a listing skips one with
-  a warning. A key segment may not start with `.tmp-` (those are the unfinished uploads). An operating-system
+  `O_NOFOLLOW`); a directory, link or special file where an object belongs is an `IntegrityError` naming the key
+  (`head`, `read` and a put report it alike), and a listing skips a link or special file with a warning. A new
+  key directory is made durable (the parent directory is flushed). A read translates only the store's own
+  operating-system errors: an `OSError` raised by the caller's code while it reads (a full destination disk) is
+  the caller's, never an `ArchiveUnavailable`. A key segment may not start with `.tmp-` (those are the unfinished uploads). An operating-system
   error is an `ArchiveUnavailable`.
 - S3 backend (needs the extra `project-ulduar[s3]`, else `ConfigurationError`): every write is conditional
   (`If-None-Match: *`) and carries its SHA-256; a checksum the store refuses is an `IntegrityError`. Timeouts:
   connect 10 s, read 60 s, three attempts. Environment proxies are never used; `proxy_env` names one. An
   endpoint must be `https://`, or `http://` to a loopback host. A failure is an `ArchiveUnavailable` worded
   `<Operation> <key> failed: <error code>` (or the error class name for a transport error), and never carries a
-  key, secret, token, endpoint or proxy address (hard rule 11).
+  credential, a proxy address or a full endpoint URL (hard rule 11); a refused endpoint is named by its host only.
 - `list_unfinished` on S3 lists every unfinished upload of the bucket and filters by prefix itself: MinIO reads a
   `Prefix` on that call as one exact key and lists nothing else.
 - `delete_every_version` removes the object and, on a versioned bucket, every version and delete marker of
@@ -394,7 +397,8 @@ session's connection (`Catalog.transaction`, the recording role); the credential
   same: a bucket policy that requires conditional writes where the server offers one, or versioning, so that an
   overwrite by another client keeps the earlier version (MinIO offers versioning only). Object lock is
   recommended, not required.
-- Objects must sit in an immediate-retrieval storage class: `GLACIER` and `DEEP_ARCHIVE` objects report
+- Objects must sit in an immediate-retrieval storage class: `GLACIER` and `DEEP_ARCHIVE` objects, and
+  INTELLIGENT_TIERING objects in the `ARCHIVE_ACCESS` or `DEEP_ARCHIVE_ACCESS` tier (`ArchiveStatus`), report
   `immediate=False` and cannot be read now. No lifecycle rule may expire or move an object.
 - The directory backend's file permissions (`0o444`) are the weaker guarantee: the process that wrote a file can
   still remove it.

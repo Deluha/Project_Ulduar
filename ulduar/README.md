@@ -17,6 +17,7 @@ file or a stream.
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation (`translate`, `translated`, `translated_transaction`) |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
+| `_schema.py` | Private, below every component: the Archivum's schema name and `qualified`, the vocabularies (`ARTIFACT_KINDS`, `HISTORIES`, `REDACTABLE_FIELDS`, `REDACTION_REASONS`), the argument checks (`check_kind`, `check_origin`, `check_checksum`), `lookup_project_id` and `advisory_xact_lock`, shared by Freya and Hodir |
 | `hodir/` | Hodir's facade (`open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`: `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`; `declare_retention`, `apply_retention`, `clean_incomplete`, `purge` and their records) and, private, the object layout, the storage interface with its directory and S3 backends (`hodir/README.md`) |
 | `freya/` | Freya's facade, schema ledger, SQL steps (the catalog, then the archive's tables), catalog session with its `transaction` hook, lineage and the ledger-role history calls (`freya/README.md`) |
 

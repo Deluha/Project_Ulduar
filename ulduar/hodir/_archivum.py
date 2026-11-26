@@ -20,28 +20,27 @@ from uuid import UUID
 from psycopg import sql
 
 from ulduar import _ids
+from ulduar._schema import ARCHIVE_REGISTRATION, ARTIFACT_IS_ARCHIVED, advisory_xact_lock, qualified
 from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import Artifact, Connection, Dataset, Project
-from ulduar.freya._records import qualified
 from ulduar.hodir._layout import DeletionRecord, HistoryRetentionRecord, MaintenanceRecord, RedactionRecord
 from ulduar.hodir._records import PASSED, Finding, LatestRule, LiveRegistration
 
-_REGISTRATION = qualified("archive_registration")
 _INSERT_REGISTRATION = sql.SQL(
     "INSERT INTO {} (project_id, scope, artifact_id, event_at, retention_class) VALUES (%s, %s, %s, %s, %s)"
     " ON CONFLICT (project_id, artifact_id) DO NOTHING RETURNING 1"
-).format(_REGISTRATION)
+).format(ARCHIVE_REGISTRATION)
 _SELECT_CLASS = sql.SQL("SELECT retention_class FROM {} WHERE project_id = %s AND artifact_id = %s").format(
-    _REGISTRATION
+    ARCHIVE_REGISTRATION
 )
 
 _SELECT_SCOPE = sql.SQL("SELECT 1 FROM {} WHERE project_id = %s AND scope = %s").format(qualified("scope"))
-_IS_ARCHIVED = sql.SQL("SELECT {}(%s, %s)").format(qualified("artifact_is_archived"))
+_IS_ARCHIVED = sql.SQL("SELECT {}(%s, %s)").format(ARTIFACT_IS_ARCHIVED)
 _LIVE = sql.SQL(
     "SELECT DISTINCT x.checksum, x.size_bytes FROM {registration} r"
-    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id"
+    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %(project_id)s AND r.scope = %(scope)s AND {archived}(r.project_id, r.artifact_id)"
-).format(registration=_REGISTRATION, artifact=qualified("artifact"), archived=qualified("artifact_is_archived"))
+).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"), archived=ARTIFACT_IS_ARCHIVED)
 _SELECT_LIVE = sql.SQL("{} ORDER BY checksum").format(_LIVE)
 # The sample: the live addresses whose latest passed finding (by the database's clock) is oldest, never-passed first.
 _SELECT_SAMPLE = sql.SQL(
@@ -73,20 +72,20 @@ _LATEST_RULES = sql.SQL(
 _LIVE_REGISTRATIONS = sql.SQL(
     "SELECT r.scope, x.checksum, x.size_bytes, r.artifact_id, x.event_at, x.dataset_id, r.retention_class,"
     " r.recorded_at FROM {registration} r"
-    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id"
+    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %(project_id)s AND (%(scope)s::text IS NULL OR r.scope = %(scope)s)"
     " AND {archived}(r.project_id, r.artifact_id) ORDER BY r.scope, x.checksum, r.artifact_id"
-).format(registration=_REGISTRATION, artifact=qualified("artifact"), archived=qualified("artifact_is_archived"))
+).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"), archived=ARTIFACT_IS_ARCHIVED)
 _ADDRESS_ARTIFACTS = sql.SQL(
     "SELECT r.artifact_id FROM {registration} r"
-    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id"
+    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %s AND r.scope = %s AND x.checksum = %s ORDER BY r.artifact_id"
-).format(registration=_REGISTRATION, artifact=qualified("artifact"))
+).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"))
 _REGISTERED_AFTER = sql.SQL(
     "SELECT EXISTS (SELECT FROM {registration} r"
-    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id"
+    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %s AND r.scope = %s AND x.checksum = %s AND r.recorded_at > %s)"
-).format(registration=_REGISTRATION, artifact=qualified("artifact"))
+).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"))
 _DELETION = qualified("archive_deletion")
 _DELETION_COLUMNS = sql.SQL(
     "deletion_id, event_at, recorded_at, scope, checksum, size_bytes, stage, intent_id, cause, rule_id, reason"
@@ -95,12 +94,14 @@ _INSERT_DELETION = sql.SQL(
     "INSERT INTO {} (project_id, deletion_id, event_at, scope, checksum, size_bytes, stage, intent_id, cause,"
     " rule_id, reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING recorded_at"
 ).format(_DELETION)
-_REGISTERED_IDS = sql.SQL("SELECT artifact_id FROM {} WHERE project_id = %s AND scope = %s").format(_REGISTRATION)
+_REGISTERED_IDS = sql.SQL("SELECT artifact_id FROM {} WHERE project_id = %s AND scope = %s").format(
+    ARCHIVE_REGISTRATION
+)
 _ADDRESS_LIVE = sql.SQL(
     "SELECT EXISTS (SELECT FROM {registration} r"
-    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id"
+    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %s AND r.scope = %s AND x.checksum = %s AND {archived}(r.project_id, r.artifact_id))"
-).format(registration=_REGISTRATION, artifact=qualified("artifact"), archived=qualified("artifact_is_archived"))
+).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"), archived=ARTIFACT_IS_ARCHIVED)
 _SELECT_SCOPES = sql.SQL("SELECT scope FROM {} WHERE project_id = %s ORDER BY scope").format(qualified("scope"))
 _SELECT_DATASET_BY_ID = sql.SQL(
     "SELECT dataset_id, project_id, scope, namespace, name, event_at, recorded_at FROM {}"
@@ -147,9 +148,7 @@ def address_lock_name(project_id: UUID, scope: str, checksum: bytes) -> str:
 
 def lock_address(tx: Connection, project_id: UUID, scope: str, checksum: bytes) -> None:
     """Hold the address lock of the object until the transaction ends."""
-    tx.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (address_lock_name(project_id, scope, checksum),)
-    )
+    advisory_xact_lock(tx, address_lock_name(project_id, scope, checksum))
 
 
 def is_archived(tx: Connection, project_id: UUID, artifact_id: UUID) -> bool:
@@ -230,9 +229,7 @@ def retention_lock_name(project_id: UUID, retention_class: str) -> str:
 
 def lock_retention(tx: Connection, project_id: UUID, retention_class: str) -> None:
     """Hold the retention lock of the class until the transaction ends."""
-    tx.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (retention_lock_name(project_id, retention_class),)
-    )
+    advisory_xact_lock(tx, retention_lock_name(project_id, retention_class))
 
 
 def latest_rules(tx: Connection, project_id: UUID) -> dict[str, LatestRule]:

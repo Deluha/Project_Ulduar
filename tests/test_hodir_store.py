@@ -7,6 +7,7 @@ handling) has its own tests. No mock: the store under test is built by `open_sto
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import math
@@ -32,6 +33,7 @@ from tests.conftest import S3Settings
 from ulduar.config import ArchiveSettings
 from ulduar.errors import ArchiveUnavailable, ConfigurationError, IntegrityError
 from ulduar.hodir import _store
+from ulduar.hodir._s3 import is_immediate
 from ulduar.hodir._store import (
     CHUNK_SIZE,
     MAX_OBJECT_SIZE,
@@ -233,7 +235,6 @@ def test_head_reports_size_and_time(settings: ArchiveSettings) -> None:
     assert (found.key, found.size, found.immediate) == ("a/one", 5, True)
     assert found.modified.tzinfo is not None and found.modified.utcoffset() == UTC.utcoffset(None)
     assert FLOOR < found.modified <= datetime.now(UTC)
-    assert store.head("a") is None  # a prefix is not an object
 
 
 def test_read_of_a_missing_key_is_an_integrity_error(settings: ArchiveSettings) -> None:
@@ -519,6 +520,41 @@ def test_a_special_file_is_not_an_object(archive_settings_dir: ArchiveSettings) 
         store.read("pipe").__enter__()
     with pytest.raises(IntegrityError, match="pipe"):
         store.put_bytes_new("pipe", b"x")
+
+
+def test_a_directory_at_an_objects_name_is_reported_alike_by_every_call(archive_settings_dir: ArchiveSettings) -> None:
+    store = open_store(archive_settings_dir)
+    object_path(archive_settings_dir, "a/one").mkdir(parents=True)
+    for action in (
+        lambda: store.head("a/one"),
+        lambda: store.read("a/one").__enter__(),
+        lambda: store.put_bytes_new("a/one", b"x"),
+    ):
+        with pytest.raises(IntegrityError, match="Object a/one is not stored as a regular file"):
+            action()
+    assert object_path(archive_settings_dir, "a/one").is_dir()
+
+
+def test_an_error_of_the_callers_own_code_inside_a_read_is_not_an_archive_error(
+    settings: ArchiveSettings,
+) -> None:
+    store = open_store(settings)
+    store.put_bytes_new("a/one", b"vault")
+    with pytest.raises(OSError, match="No space left") as caught:
+        with store.read("a/one") as stream:
+            assert stream.read(2) == b"va"
+            raise OSError(errno.ENOSPC, "No space left on device")
+    assert not isinstance(caught.value, ArchiveUnavailable)
+
+
+def test_the_cold_storage_classes_and_archive_tiers_are_not_immediate() -> None:
+    for storage_class in (None, "STANDARD", "INTELLIGENT_TIERING", "STANDARD_IA"):
+        assert is_immediate(storage_class)
+        assert is_immediate(storage_class, None)
+    for storage_class in ("GLACIER", "DEEP_ARCHIVE"):
+        assert not is_immediate(storage_class)
+    for archive_status in ("ARCHIVE_ACCESS", "DEEP_ARCHIVE_ACCESS"):
+        assert not is_immediate("INTELLIGENT_TIERING", archive_status)
 
 
 def test_a_directory_key_may_not_look_like_a_temporary_file(archive_settings_dir: ArchiveSettings) -> None:

@@ -16,11 +16,10 @@ import logging
 from typing import NamedTuple
 from uuid import UUID
 
+from ulduar._schema import REDACTION_REASONS, check_checksum
 from ulduar.config import Config, check_name
 from ulduar.errors import ConfigurationError, UlduarError, UnknownRecordError
 from ulduar.freya import Connection, open_catalog
-from ulduar.freya.catalog import check_checksum
-from ulduar.freya.history import REDACTION_REASONS
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._deletion import delete_address, manifest_keys
 from ulduar.hodir._layout import DeletionRecord

@@ -28,6 +28,7 @@ from tests.conftest import (
     wait_until_blocked,
 )
 from ulduar import _db, _ids
+from ulduar._schema import HISTORIES
 from ulduar.config import Config
 from ulduar.errors import ConfigurationError, SchemaVersionError, UlduarError, UnknownRecordError
 from ulduar.freya import (
@@ -45,7 +46,7 @@ from ulduar.freya import (
     reapply_removals,
     redact,
 )
-from ulduar.freya.history import HISTORIES, MAINTENANCE_SETTING, retention_lock_name
+from ulduar.freya.history import MAINTENANCE_SETTING, retention_lock_name
 
 OLD_DAYS = 200
 OLDER_DAYS = 300
@@ -496,6 +497,34 @@ def test_reapplying_refuses_an_unknown_project_and_anything_that_is_not_a_remova
     with pytest.raises(ValueError, match="History 'dataset' is not one of"):
         reapply_removals(config, [removal_action(10, 0, history="dataset")])
     assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_action") == 0
+
+
+def test_a_bad_removal_is_refused_before_any_sql_and_nothing_is_applied(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path)
+    with open_catalog(config) as catalog:
+        artifact = catalog.register_artifact("raw_file", CHECKSUM, 1, origin="a")
+    valid = removal_redaction(artifact.artifact_id)
+    not_v7 = uuid.uuid4()
+    bad: list[tuple[Redaction | RetentionAction, str]] = [
+        (removal_redaction(artifact.artifact_id, "lineage_edge", "origin"), "lineage_edge.origin cannot be redacted"),
+        (removal_redaction(artifact.artifact_id, "artifact", "dataset_id"), "artifact.dataset_id cannot be redacted"),
+        (dataclasses.replace(valid, reason="boredom"), "Reason 'boredom' is not one of"),  # type: ignore[arg-type]
+        (dataclasses.replace(valid, redaction_id=not_v7), str(not_v7)),
+        (removal_action(10, 0, history="dataset"), "History 'dataset' is not one of"),
+        (dataclasses.replace(removal_action(10, 0), keep_days=0), "keep_days 0 must be a positive integer or None"),
+        (dataclasses.replace(removal_action(10, 0), action_id=not_v7), str(not_v7)),
+        (dataclasses.replace(removal_action(10, 0), rule_id=not_v7), str(not_v7)),
+    ]
+    for removal, message in bad:
+        for removals in ([removal], [valid, removal]):  # a valid removal first is not applied either
+            with pytest.raises(ValueError, match=message):
+                reapply_removals(config, removals)
+    assert count(archivum, "SELECT count(*) FROM ulduar.redaction") == 0
+    assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_action") == 0
+    assert count(archivum, "SELECT count(*) FROM ulduar.artifact WHERE origin = 'a'") == 1
+    assert reapply_removals(config, [dataclasses.replace(removal_action(10, 0), keep_days=None)]) == ReapplyResult(
+        1, 0, 0
+    )  # keep for ever is a valid action
 
 
 def test_a_recording_role_reads_the_redactions_and_actions_of_its_own_project_only(

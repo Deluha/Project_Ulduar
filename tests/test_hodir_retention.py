@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
@@ -33,8 +34,10 @@ from tests.conftest import (
     archive_config,
     count,
     digest,
+    failure,
     ms_ago,
     onboarded,
+    recorder_of,
     s3_archive_settings,
     wait_until_blocked,
 )
@@ -497,6 +500,40 @@ def test_a_project_that_is_not_onboarded_is_unknown(archivum: Archivum, tmp_path
     with pytest.raises(UnknownRecordError, match="Project beta is not onboarded"):
         declare_retention(config, "beta", "short", 30, confirm_shortening=True)
     assert rule_rows(archivum) == []
+
+
+def test_another_projects_recorder_sees_no_deletions_or_rules_and_cannot_record_a_deletion(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    alpha = onboarded(archivum, tmp_path)
+    declare_retention(alpha, "alpha", "short", 30, confirm_shortening=True)
+    insert = (
+        "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes, stage,"
+        " cause) VALUES (%s, %s, %s, 'default', %s, 1, 'intent', 'incomplete_put')"
+    )
+    with archivum.superuser() as su:
+        row = su.execute("SELECT project_id FROM ulduar.project WHERE name = 'alpha'").fetchone()
+        assert row is not None
+        deletion_id = _ids.uuid7()
+        su.execute(insert, (row[0], deletion_id, _ids.uuid7_time(deletion_id), digest("content")))
+    beta = onboarded(archivum, tmp_path, "beta")
+    with open_catalog(beta) as catalog:
+        for query in (
+            "SELECT count(*) FROM ulduar.archive_deletion",
+            "SELECT count(*) FROM ulduar.archive_retention_rule",
+        ):
+            seen = catalog.transaction("Counting", lambda tx, query=query: tx.execute(query))
+            assert seen.fetchone() == (0,)
+    forged = _ids.uuid7()
+    error = failure(
+        beta,
+        recorder_of(archivum, beta).env,
+        insert,
+        (row[0], forged, _ids.uuid7_time(forged), digest("content")),  # alpha's project id
+    )
+    assert isinstance(error, psycopg.errors.InsufficientPrivilege)
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_deletion") == 1
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_retention_rule") == 1
 
 
 def test_declaring_needs_the_ledger_role(archivum: Archivum, tmp_path: Path) -> None:

@@ -22,10 +22,8 @@ from typing import TypeVar, cast
 from uuid import UUID
 
 from ulduar import _ids
-from ulduar.config import NAME_PATTERN, check_name
-from ulduar.errors import ArchiveFormatError
-from ulduar.freya.catalog import ARTIFACT_KINDS
-from ulduar.freya.history import (
+from ulduar._schema import (
+    ARTIFACT_KINDS,
     HISTORIES,
     REDACTABLE_FIELDS,
     REDACTION_REASONS,
@@ -33,6 +31,8 @@ from ulduar.freya.history import (
     RedactionReason,
     RetentionHistory,
 )
+from ulduar.config import NAME_PATTERN, check_name
+from ulduar.errors import ArchiveFormatError
 
 FORMAT_MARKER_KEY = "ulduar-archive.json"
 FORMAT_NAME = "ulduar-archive"
@@ -115,7 +115,6 @@ _RETENTION_ACTION_FIELDS = (
 )
 DELETION_STAGES = ("intent", "confirmed", "cancelled")
 DELETION_CAUSES = ("retention", "incomplete_put", "purge")
-PURGE_REASONS = ("personal_data", "secret", "recorded_by_mistake")
 T = TypeVar("T")
 _HEX = re.compile(r"[0-9a-f]{64}")
 _EVENT_AT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
@@ -382,7 +381,7 @@ class DeletionRecord:
                 intent_id=_optional(fields["intent_id"], lambda v: _uuid7(v, "intent_id")),
                 cause=_choice(fields["cause"], "cause", DELETION_CAUSES),
                 rule_id=_optional(fields["rule_id"], lambda v: _uuid7(v, "rule_id")),
-                reason=_optional(fields["reason"], lambda v: _choice(v, "reason", PURGE_REASONS)),
+                reason=_optional(fields["reason"], lambda v: _choice(v, "reason", REDACTION_REASONS)),
             )
         except ValueError as e:
             raise ArchiveFormatError(f"The deletion record field {e}") from None

@@ -15,10 +15,10 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 |---|---|
 | `__init__.py` | The facade: re-exports the public surface listed under Interfaces & contracts |
 | `ledger.py` | `load_steps`, `install`, `check_schema`, `schema_status`, `library_release`, `open_ledger_connection`, the bootstrap, `LEDGER_LOCK_KEY` |
-| `_records.py` | Private, below the others: the records (`Project`, `NodeRef`, `Dataset`, `Artifact`, `LineageEdge`, `LineageNode`, `RetentionAction`), `qualified` (the one home of the schema name), `Connection`, `insert_with_partition_retry` |
-| `catalog.py` | `ARTIFACT_KINDS`, `open_catalog` and `Catalog` (with `transaction`, the hook the other components record through); the argument checks `check_kind` and `check_origin`, which Hodir reuses to validate a put before it stores anything |
+| `_records.py` | Private, below the catalog and lineage modules: their records (`Project`, `NodeRef`, `Dataset`, `Artifact`, `LineageEdge`, `LineageNode`) and `insert_with_partition_retry`; the history records (`RetentionRule`, `RetentionResult`, `Redaction`, `RetentionAction`, `ReapplyResult`) sit in `history.py`. The schema's names, vocabularies and validators are `ulduar/_schema.py`'s, shared with Hodir |
+| `catalog.py` | `open_catalog` and `Catalog` (with `transaction`, the hook the other components record through); the argument checks it makes are `ulduar._schema`'s (`check_kind`, `check_origin`, `check_checksum`), which Hodir reuses to validate a put before it stores anything |
 | `lineage.py` | The edge insert and the ancestor and descendant walks, as functions of `(conn, settings, project, …)` that `Catalog` calls with its own |
-| `history.py` | Ledger-role calls: `onboard_project`, `declare_history_retention`, `apply_history_retention`, `redact`, `reapply_removals`; the only code that issues `UPDATE` or `DELETE` against history |
+| `history.py` | Ledger-role calls: `onboard_project`, `declare_history_retention`, `apply_history_retention`, `redact`, `reapply_removals`, and the history records; the only code that issues `UPDATE` or `DELETE` against history |
 | `steps/0001_catalog.sql` | Step 1: roles, tables, functions, triggers, partitions, row-level security and grants |
 | `steps/0002_archive.sql` | Step 2 (additive): the archive's tables, the registration trigger, `artifact_is_archived`, the history list widened, the partition functions replaced |
 
@@ -119,8 +119,9 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   too), `lineage_edge`, `artifact`, `archive_check`, `archive_finding`, and `ensure_partitions` makes its partitions in the same order
   (`CREATE ... PARTITION OF` locks the parent). That is the order of the only recorder that holds both: an edge
   insert locks `lineage_edge`, then its trigger reads `artifact`. Creating an `artifact` partition also takes
-  `SHARE ROW EXCLUSIVE` on `dataset`, `scope` and `artifact_kind`, through the cloned foreign keys. The lock
-  order is `lineage_edge`, `artifact`, `archive_check`, `archive_finding`, then {`dataset`, `scope`, `artifact_kind`}: every path takes these tables
+  `SHARE ROW EXCLUSIVE` on `dataset`, `scope` and `artifact_kind`, through the cloned foreign keys, before the
+  next table's partitions are made. The lock order is therefore `lineage_edge`, `artifact`, {`dataset`, `scope`,
+  `artifact_kind`}, then `archive_check`, `archive_finding`: every path takes these tables
   in that order, or touches only one of them in a transaction (every other recorder path; each count of a
   retention dry run, which runs in a transaction of its own, as each delete does), so none deadlocks with
   another. `archive_registration` is in no such path: a registration insert reads `artifact`, and the partition
@@ -233,7 +234,10 @@ ends with the transaction).
   the rows of its history older than its `cutoff` are deleted by the code `apply_history_retention` uses (an
   artifact whose object is archived stays; registrations leave with their artifacts), and the action is recorded
   with its original id, time and `rows_removed` (what it removed then, not now). A project the Archivum lacks is
-  `UnknownRecordError`, a history that is not retained a `ValueError`. A restored rule is a new row whose `recorded_at` is the database's now, so it would win as the
+  `UnknownRecordError`. Every removal is checked before the first transaction, as `redact` and
+  `declare_history_retention` check theirs (a redaction's history, field and reason; an action's history and
+  `keep_days`; the redaction, action and rule ids UUIDv7; the wrong type), and a bad one is a `ValueError` with nothing applied. The
+  steps are loaded once per call. A restored rule is a new row whose `recorded_at` is the database's now, so it would win as the
   latest rule over one the Archivum already holds; when that rule's `event_at` is later than the restored rule's, a new
   rule record (a new id) repeating its `keep_days` is appended in the same transaction, after the retention lock of
   the pair, so the rule in force is unchanged (an `info` line says so). With no later rule the restored one is the
@@ -242,8 +246,9 @@ ends with the transaction).
 ## Interfaces & contracts
 
 - `install(config, *, allow_breaking=False) -> SchemaStatus`: needs `archivum.ledger_dsn_env`.
-- `ledger_transaction(config, what, *, purpose=None)`: see History; `history.lookup_project_id(tx, project)` (the id of
-  an onboarded project, else `UnknownRecordError`) is the module's helper that Hodir's retention shares.
+- `ledger_transaction(config, what, *, purpose=None)`: see History. What Freya and Hodir share lives in
+  `ulduar/_schema.py` (`qualified`, `lookup_project_id`, `advisory_xact_lock`, the vocabularies and the argument
+  checks), so Hodir imports Freya only through `ulduar.freya`.
 - `schema_status(config) -> SchemaStatus(applied_step, known_step, pending, min_library_version, compatible)`.
 - Not public: `Step` and `load_steps` stay importable from `ulduar.freya.ledger` for internal use only.
 - `open_catalog(config) -> context manager yielding Catalog` (recording role). `Catalog.project: Project`,
@@ -270,8 +275,9 @@ ends with the transaction).
   reason, *, redaction_id=None) -> Redaction(redaction_id, project, history, record_id, field, reason,
   event_at)`; `reapply_removals(config, removals) -> ReapplyResult(applied, already_present, missing_targets)`.
 - `Connection` (`psycopg.Connection[TupleRow]`) is exported for the callbacks of `Catalog.transaction`.
-- Constants: `ARTIFACT_KINDS` (a test holds it equal to the `artifact_kind` rows); in `history.py`: `HISTORIES` (a test holds it equal to the schema's CHECK list),
-  `REDACTABLE_FIELDS`, `REDACTION_REASONS`, `MAINTENANCE_SETTING`.
+- Constants: `ARTIFACT_KINDS` (re-exported from `ulduar/_schema.py`; a test holds it equal to the `artifact_kind`
+  rows); in `ulduar/_schema.py`: `HISTORIES` (a test holds it equal to the schema's CHECK list),
+  `REDACTABLE_FIELDS`, `REDACTION_REASONS`; in `history.py`: `MAINTENANCE_SETTING`.
 - Exceptions: `ConfigurationError`, `SchemaVersionError`, `LedgerError`, `ArchivumUnavailable` and the other
   members of `ulduar.errors`.
 - Library log lines (loggers `ulduar.freya.*`, no handler of their own): `info` per applied step

@@ -22,7 +22,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 from ulduar.config import ArchiveSettings
 from ulduar.errors import ArchiveUnavailable, ConfigurationError, IntegrityError
@@ -51,7 +51,9 @@ _Found = list[tuple[str, os.stat_result]]
 
 
 def _not_regular(key: str) -> IntegrityError:
-    return IntegrityError(f"Object {key} is not stored as a regular file: a link or special file is in its way")
+    return IntegrityError(
+        f"Object {key} is not stored as a regular file: a directory, link or special file is in its way"
+    )
 
 
 @contextmanager
@@ -81,21 +83,23 @@ def _step(parent: int, name: str, key: str, create: bool) -> int | None:
         if not create:
             return None
         raise
-    with suppress(FileExistsError):  # another writer made it first
+    try:
         os.mkdir(name, DIRECTORY_MODE, dir_fd=parent)
+    except FileExistsError:  # another writer made it first
+        pass
+    else:
+        os.fsync(parent)  # the new directory entry survives a crash
     return _step(parent, name, key, create=False)
 
 
 def _lstat(directory: int, name: str, key: str) -> os.stat_result | None:
-    """The status of the regular file *name* in *directory*; None when absent or a directory (a prefix, not an object).
+    """The status of the regular file *name* in *directory*; None when absent.
 
-    A symbolic link or special file is an `IntegrityError`.
+    A directory, symbolic link or special file at the name is an `IntegrityError`, as `read` reports it.
     """
     try:
         status = os.stat(name, dir_fd=directory, follow_symlinks=False)
     except FileNotFoundError:
-        return None
-    if stat.S_ISDIR(status.st_mode):
         return None
     if not stat.S_ISREG(status.st_mode):
         raise _not_regular(key)
@@ -112,6 +116,19 @@ def _split(key: str) -> tuple[list[str], str]:
     if any(segment.startswith(TEMP_PREFIX) for segment in segments):
         raise ValueError(f"The object key {key!r} must not start a segment with {TEMP_PREFIX!r}")
     return segments[:-1], segments[-1]
+
+
+class _Reader:
+    """An object's open file as `read` hands it out: only `read` is offered, and its operating-system errors are
+    `ArchiveUnavailable`. An error raised by the caller's own code around it (a full destination disk) is not."""
+
+    def __init__(self, handle: BinaryIO, key: str) -> None:
+        self._handle = handle
+        self._key = key
+
+    def read(self, size: int = -1) -> bytes:
+        with _translated("Reading", self._key):
+            return self._handle.read(size)
 
 
 class DirectoryStore:
@@ -178,7 +195,7 @@ class DirectoryStore:
             finally:
                 with suppress(OSError):  # best effort: the temporary file is gone after a successful link
                     os.unlink(temporary, dir_fd=parent)
-            logger.debug("Stored object %s (%d bytes)", key, size)
+            logger.debug("stored object %s (%d bytes)", key, size)
             return True
 
     @staticmethod
@@ -211,11 +228,10 @@ class DirectoryStore:
 
     @contextmanager
     def _read(self, key: str, directory: Sequence[str], name: str) -> Iterator[BinaryIO]:
-        with _translated("Reading", key):
-            with self._directory(directory, key, create=False) as parent:
-                handle = self._open_file(parent, name, key)
-            with handle:
-                yield handle
+        with _translated("Reading", key), self._directory(directory, key, create=False) as parent:
+            handle = self._open_file(parent, name, key)
+        with handle:  # outside the translation: an error of the caller's own code is not the store's
+            yield cast(BinaryIO, _Reader(handle, key))
 
     @staticmethod
     def _open_file(parent: int | None, name: str, key: str) -> BinaryIO:
@@ -283,7 +299,7 @@ class DirectoryStore:
                 elif entry.is_file(follow_symlinks=False):
                     found.append((key, entry.stat(follow_symlinks=False)))
                 else:
-                    logger.warning("Skipped %s: a symbolic link or special file is not an archived object", key)
+                    logger.warning("skipped %s: a symbolic link or special file is not an archived object", key)
 
 
 def _is_temporary(key: str) -> bool:

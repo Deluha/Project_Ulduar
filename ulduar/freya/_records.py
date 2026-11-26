@@ -1,8 +1,8 @@
-"""What Freya's modules share: the frozen records, the schema's names and the partition retry.
+"""What Freya's catalog and lineage modules share: their frozen records and the partition retry.
 
-Private: the facade re-exports the records, a consumer never imports this module. `qualified` is the one home of
-the schema name; every composed statement reaches a table or function of the Archivum through it. The records
-sit here, below the catalog, lineage and history modules, so none of them imports another to build one.
+Private: the facade re-exports the records, a consumer never imports this module. The records sit here, below the
+catalog and lineage modules, so neither imports the other to build one; the history records sit in `history`. The
+schema's names, vocabularies and validators are in `ulduar._schema`.
 """
 
 from __future__ import annotations
@@ -16,24 +16,17 @@ from uuid import UUID
 
 import psycopg
 from psycopg import sql
-from psycopg.rows import TupleRow
 
 from ulduar import _db
+from ulduar._schema import Connection, qualified
 from ulduar.config import ArchivumSettings
 
 logger = logging.getLogger(__name__)
 
-SCHEMA = "ulduar"
 # `INSERT` into a partitioned table whose month has no partition: check_violation, and no constraint is named.
 _CHECK_VIOLATION = "23514"
 
-Connection = psycopg.Connection[TupleRow]
 Result = TypeVar("Result")
-
-
-def qualified(name: str) -> sql.Identifier:
-    """The table or function *name* of schema `ulduar`, quoted."""
-    return sql.Identifier(SCHEMA, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,25 +92,6 @@ class LineageEdge:
     run_id: UUID | None
     event_at: datetime
     recorded_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class RetentionAction:
-    """A recorded application of a history-retention rule: the rows of *history* older than *cutoff* were removed.
-
-    *keep_days* and *rule_event_at* are the applied rule's (*rule_id*); *rows_removed* is how many rows went;
-    *event_at* is the time inside *action_id*.
-    """
-
-    action_id: UUID
-    project: str
-    history: str
-    rule_id: UUID
-    keep_days: int | None
-    rule_event_at: datetime
-    cutoff: datetime
-    rows_removed: int
-    event_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

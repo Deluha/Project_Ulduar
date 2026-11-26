@@ -24,9 +24,9 @@ from psycopg.rows import TupleRow
 
 import ulduar
 from ulduar import _db
+from ulduar._schema import SCHEMA, Connection, qualified
 from ulduar.config import Config
 from ulduar.errors import ConfigurationError, LedgerError, SchemaVersionError
-from ulduar.freya._records import SCHEMA, Connection, qualified
 
 logger = logging.getLogger(__name__)
 
@@ -300,12 +300,21 @@ def ledger_transaction(config: Config, what: str, *, purpose: str | None = None)
     `archivum.ledger_dsn_env`, naming *purpose* (default *what*). The hook through which Ulduar's components run
     ledger-role calls, the counterpart of `Catalog.transaction`.
     """
+    with transaction_with_steps(config, what, purpose, load_steps()) as tx:
+        yield tx
+
+
+@contextmanager
+def transaction_with_steps(
+    config: Config, what: str, purpose: str | None, steps: tuple[Step, ...]
+) -> Iterator[Connection]:
+    """`ledger_transaction` checking the schema against *steps*, for a caller that runs many and loads them once."""
     settings = config.archivum
     with (
         open_ledger_connection(config, what if purpose is None else purpose) as conn,
         _db.translated_transaction(conn, settings, what) as tx,
     ):
-        check_schema(tx, load_steps())
+        check_schema(tx, steps)
         yield tx
 
 

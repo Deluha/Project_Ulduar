@@ -7,20 +7,13 @@ the ledger-role calls on history (onboarding, retention, redaction and the re-ap
 counterpart of `Catalog.transaction`.
 """
 
-from ulduar.freya._records import (
-    Artifact,
-    Connection,
-    Dataset,
-    LineageEdge,
-    LineageNode,
-    NodeRef,
-    Project,
-    RetentionAction,
-)
-from ulduar.freya.catalog import ARTIFACT_KINDS, Catalog, open_catalog
+from ulduar._schema import ARTIFACT_KINDS, Connection
+from ulduar.freya._records import Artifact, Dataset, LineageEdge, LineageNode, NodeRef, Project
+from ulduar.freya.catalog import Catalog, open_catalog
 from ulduar.freya.history import (
     ReapplyResult,
     Redaction,
+    RetentionAction,
     RetentionResult,
     RetentionRule,
     apply_history_retention,
