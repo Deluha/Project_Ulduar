@@ -1,16 +1,18 @@
 """Hodir's SQL against the Archivum, in one place: the locks, the registration insert, the archived check, the
-verification and retention reads and the deletion records.
+verification and retention reads, the deletion records and the reads the record sweep and a rebuild make.
 
 Input: a transaction of the catalog session (`Catalog.transaction`), or of the ledger role for the retention rule,
 and the ids and checksums of one put, get, verification or deletion. Output: the registration row of an archived
 artifact, whether an artifact's object is still archived, the live addresses and registrations of a scope, the
-rows of a verification, the latest retention rules and the intent and outcome rows of a deletion. Private: Hodir's
+rows of a check, the latest retention rules, the intent and outcome rows of a deletion, a dataset by id, and the
+maintenance records (deletions, redactions, history-retention actions) of a project. Private: Hodir's
 modules import it, a consumer never does. Every statement composes identifiers through Freya's `qualified` and
 binds values as parameters (hard rule 3).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -19,10 +21,10 @@ from psycopg import sql
 
 from ulduar import _ids
 from ulduar.errors import UlduarError, UnknownRecordError
-from ulduar.freya import Artifact, Connection, Project
+from ulduar.freya import Artifact, Connection, Dataset, Project
 from ulduar.freya._records import qualified
-from ulduar.hodir._layout import DeletionRecord
-from ulduar.hodir._records import LatestRule, LiveRegistration, Verification
+from ulduar.hodir._layout import DeletionRecord, HistoryRetentionRecord, MaintenanceRecord, RedactionRecord
+from ulduar.hodir._records import PASSED, Finding, LatestRule, LiveRegistration
 
 _REGISTRATION = qualified("archive_registration")
 _INSERT_REGISTRATION = sql.SQL(
@@ -51,7 +53,7 @@ _SELECT_SAMPLE = sql.SQL(
 ).format(live=_LIVE, finding=qualified("archive_finding"))
 _INSERT_CHECK = sql.SQL(
     "INSERT INTO {} (project_id, check_id, event_at, scope, kind, mode, objects_checked, findings)"
-    " VALUES (%s, %s, %s, %s, 'verification', %s, %s, %s)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
 ).format(qualified("archive_check"))
 _INSERT_FINDING = sql.SQL(
     "INSERT INTO {} (project_id, finding_id, event_at, check_id, scope, checksum, size_bytes, outcome)"
@@ -93,19 +95,43 @@ _INSERT_DELETION = sql.SQL(
     "INSERT INTO {} (project_id, deletion_id, event_at, scope, checksum, size_bytes, stage, intent_id, cause,"
     " rule_id, reason) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING recorded_at"
 ).format(_DELETION)
+_REGISTERED_IDS = sql.SQL("SELECT artifact_id FROM {} WHERE project_id = %s AND scope = %s").format(_REGISTRATION)
+_ADDRESS_LIVE = sql.SQL(
+    "SELECT EXISTS (SELECT FROM {registration} r"
+    " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id"
+    " WHERE r.project_id = %s AND r.scope = %s AND x.checksum = %s AND {archived}(r.project_id, r.artifact_id))"
+).format(registration=_REGISTRATION, artifact=qualified("artifact"), archived=qualified("artifact_is_archived"))
+_SELECT_SCOPES = sql.SQL("SELECT scope FROM {} WHERE project_id = %s ORDER BY scope").format(qualified("scope"))
+_SELECT_DATASET_BY_ID = sql.SQL(
+    "SELECT dataset_id, project_id, scope, namespace, name, event_at, recorded_at FROM {}"
+    " WHERE project_id = %s AND dataset_id = %s"
+).format(qualified("dataset"))
 # An intent with no outcome row: one deletion started and not settled.
 _OPEN_INTENT = sql.SQL(
     "SELECT {columns} FROM {deletion} i WHERE i.project_id = %s AND i.scope = %s AND i.checksum = %s"
     " AND i.stage = 'intent' AND NOT EXISTS (SELECT FROM {deletion} o"
     " WHERE o.project_id = i.project_id AND o.intent_id = i.deletion_id) ORDER BY i.recorded_at, i.deletion_id LIMIT 1"
 ).format(columns=_DELETION_COLUMNS, deletion=_DELETION)
-# The open intents of retention deletions, of one scope or (a NULL scope) of every scope.
-_OPEN_RETENTION_INTENTS = sql.SQL(
+# The open intents of deletions of one cause, in one scope or (a NULL scope) in every scope.
+_OPEN_INTENTS = sql.SQL(
     "SELECT {columns} FROM {deletion} i WHERE i.project_id = %(project_id)s"
-    " AND (%(scope)s::text IS NULL OR i.scope = %(scope)s) AND i.stage = 'intent' AND i.cause = 'retention'"
+    " AND (%(scope)s::text IS NULL OR i.scope = %(scope)s) AND i.stage = 'intent' AND i.cause = %(cause)s"
     " AND NOT EXISTS (SELECT FROM {deletion} o WHERE o.project_id = i.project_id AND o.intent_id = i.deletion_id)"
     " ORDER BY i.scope, i.checksum, i.recorded_at, i.deletion_id"
 ).format(columns=_DELETION_COLUMNS, deletion=_DELETION)
+_ALL_DELETIONS = sql.SQL(
+    "SELECT {columns} FROM {deletion} WHERE project_id = %s ORDER BY recorded_at, deletion_id"
+).format(columns=_DELETION_COLUMNS, deletion=_DELETION)
+_ALL_REDACTIONS = sql.SQL(
+    "SELECT redaction_id, event_at, history, record_id, field, reason FROM {} WHERE project_id = %s"
+    " ORDER BY redaction_id"
+).format(qualified("redaction"))
+# A history-retention action with the keep_days and event_at of the rule it applied.
+_ALL_ACTIONS = sql.SQL(
+    "SELECT a.action_id, a.event_at, a.history, a.rule_id, r.keep_days, r.event_at, a.cutoff, a.rows_removed"
+    " FROM {action} a JOIN {rule} r ON r.project_id = a.project_id AND r.rule_id = a.rule_id"
+    " WHERE a.project_id = %s ORDER BY a.action_id"
+).format(action=qualified("history_retention_action"), rule=qualified("history_retention_rule"))
 
 
 def check_scope(tx: Connection, project: Project, scope: str) -> None:
@@ -160,12 +186,24 @@ def sample_addresses(tx: Connection, project_id: UUID, scope: str, n: int) -> li
     return [(row[0], row[1]) for row in rows]
 
 
-def insert_check(tx: Connection, project_id: UUID, check: Verification) -> None:
-    """Record *check*: one `archive_check` row and one `archive_finding` row per finding."""
-    tx.execute(
-        _INSERT_CHECK,
-        (project_id, check.check_id, check.event_at, check.scope, check.mode, check.objects_checked, len(check.failed)),
-    )
+def insert_check(
+    tx: Connection,
+    project_id: UUID,
+    *,
+    check_id: UUID,
+    scope: str,
+    kind: str,
+    mode: str,
+    objects_checked: int,
+    findings: Sequence[Finding],
+) -> None:
+    """Record one `archive_check` of *kind* (`verification` or `reconciliation`) and a row per finding.
+
+    The check's `event_at` is the time inside *check_id*; its `findings` count is those not `passed`.
+    """
+    failed = sum(finding.outcome != PASSED for finding in findings)
+    params = (project_id, check_id, _ids.uuid7_time(check_id), scope, kind, mode, objects_checked, failed)
+    tx.execute(_INSERT_CHECK, params)
     with tx.cursor() as cursor:
         cursor.executemany(
             _INSERT_FINDING,
@@ -174,13 +212,13 @@ def insert_check(tx: Connection, project_id: UUID, check: Verification) -> None:
                     project_id,
                     f.finding_id,
                     _ids.uuid7_time(f.finding_id),
-                    check.check_id,
+                    check_id,
                     f.scope,
                     f.checksum,
                     f.size,
                     f.outcome,
                 )
-                for f in check.findings
+                for f in findings
             ],
         )
 
@@ -332,7 +370,70 @@ def find_open_intent(tx: Connection, project: Project, scope: str, checksum: byt
     return None if row is None else _deletion_record(project, row)
 
 
-def open_retention_intents(tx: Connection, project: Project, scope: str | None) -> list[DeletionRecord]:
-    """Every intent of a retention deletion with no outcome yet, in *scope* (None: every scope)."""
-    rows = tx.execute(_OPEN_RETENTION_INTENTS, {"project_id": project.project_id, "scope": scope}).fetchall()
-    return [_deletion_record(project, row) for row in rows]
+def open_intents(tx: Connection, project: Project, scope: str | None, cause: str) -> list[DeletionRecord]:
+    """Every intent of a deletion of *cause* with no outcome yet, in *scope* (None: every scope)."""
+    params = {"project_id": project.project_id, "scope": scope, "cause": cause}
+    return [_deletion_record(project, row) for row in tx.execute(_OPEN_INTENTS, params).fetchall()]
+
+
+def database_now(tx: Connection) -> datetime:
+    """The database's clock, as of the start of the transaction: the time every grace period is measured against."""
+    row = tx.execute("SELECT now()").fetchone()
+    assert row is not None
+    now: datetime = row[0]
+    return now
+
+
+def project_scopes(tx: Connection, project_id: UUID) -> list[str]:
+    """The project's scopes, by name."""
+    return [row[0] for row in tx.execute(_SELECT_SCOPES, (project_id,)).fetchall()]
+
+
+def registered_artifact_ids(tx: Connection, project_id: UUID, scope: str) -> set[UUID]:
+    """The ids of the artifacts that have a registration in the scope, live or not."""
+    return {row[0] for row in tx.execute(_REGISTERED_IDS, (project_id, scope)).fetchall()}
+
+
+def address_is_live(tx: Connection, project_id: UUID, scope: str, checksum: bytes) -> bool:
+    """True when some registration of the object (*scope*, *checksum*) is archived (`artifact_is_archived`)."""
+    row = tx.execute(_ADDRESS_LIVE, (project_id, scope, checksum)).fetchone()
+    return row is not None and bool(row[0])
+
+
+def find_dataset(tx: Connection, project_id: UUID, dataset_id: UUID) -> Dataset | None:
+    """The dataset of the project with this id, or None; a manifest names its dataset by id only."""
+    row = tx.execute(_SELECT_DATASET_BY_ID, (project_id, dataset_id)).fetchone()
+    return None if row is None else Dataset(*row)
+
+
+def deletion_records(tx: Connection, project: Project) -> list[DeletionRecord]:
+    """Every deletion row of the project, in the order it was recorded."""
+    return [_deletion_record(project, row) for row in tx.execute(_ALL_DELETIONS, (project.project_id,)).fetchall()]
+
+
+def maintenance_records(tx: Connection, project: Project) -> list[MaintenanceRecord]:
+    """Every deletion, redaction and history-retention action of the project, as the store holds them."""
+    records: list[MaintenanceRecord] = [*deletion_records(tx, project)]
+    for row in tx.execute(_ALL_REDACTIONS, (project.project_id,)).fetchall():
+        records.append(RedactionRecord(row[0], row[1], project.name, row[2], row[3], row[4], row[5]))
+    for row in tx.execute(_ALL_ACTIONS, (project.project_id,)).fetchall():
+        records.append(HistoryRetentionRecord(row[0], row[1], project.name, *row[2:]))
+    return records
+
+
+def restore_deletion(tx: Connection, project_id: UUID, record: DeletionRecord) -> None:
+    """Insert a deletion row read from the store under its own id and times (`recorded_at` is the database's now)."""
+    params = (
+        project_id,
+        record.deletion_id,
+        record.event_at,
+        record.scope,
+        record.checksum,
+        record.size,
+        record.stage,
+        record.intent_id,
+        record.cause,
+        record.rule_id,
+        record.reason,
+    )
+    tx.execute(_INSERT_DELETION, params)

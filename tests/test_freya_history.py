@@ -18,6 +18,7 @@ from tests.conftest import (
     CHECKSUM,
     Archivum,
     count,
+    failure,
     lineage_lock_name,
     ms_ago,
     old_artifacts,
@@ -31,6 +32,9 @@ from ulduar.config import Config
 from ulduar.errors import ConfigurationError, SchemaVersionError, UlduarError, UnknownRecordError
 from ulduar.freya import (
     Project,
+    ReapplyResult,
+    Redaction,
+    RetentionAction,
     RetentionResult,
     apply_history_retention,
     declare_history_retention,
@@ -38,6 +42,7 @@ from ulduar.freya import (
     ledger_transaction,
     onboard_project,
     open_catalog,
+    reapply_removals,
     redact,
 )
 from ulduar.freya.history import HISTORIES, MAINTENANCE_SETTING, retention_lock_name
@@ -348,6 +353,178 @@ def test_redacting_an_unknown_or_foreign_record_is_refused_and_records_nothing(
     assert count(archivum, "SELECT count(*) FROM ulduar.redaction") == 0
     with open_catalog(alpha) as catalog:
         assert catalog.get_artifact(artifact.artifact_id).origin == "a"
+
+
+def test_a_redaction_made_under_a_given_id_is_idempotent_and_takes_its_time_from_the_id(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    redaction_id = _ids.uuid7(ms_ago(3))
+    with open_catalog(config) as catalog:
+        artifact = catalog.register_artifact("raw_file", CHECKSUM, 1, origin="a")
+    first = redact(config, "alpha", "artifact", artifact.artifact_id, "origin", "secret", redaction_id=redaction_id)
+    assert first.redaction_id == redaction_id and first.event_at == _ids.uuid7_time(redaction_id)
+    assert (
+        redact(config, "alpha", "artifact", artifact.artifact_id, "origin", "secret", redaction_id=redaction_id)
+        == first
+    )
+    with pytest.raises(UlduarError, match="already recorded with different content"):
+        redact(config, "alpha", "artifact", artifact.artifact_id, "origin", "personal_data", redaction_id=redaction_id)
+    assert count(archivum, "SELECT count(*) FROM ulduar.redaction") == 1
+    with pytest.raises(ValueError, match="version 7"):
+        redact(config, "alpha", "artifact", artifact.artifact_id, "origin", "secret", redaction_id=uuid.uuid4())
+    with pytest.raises(UnknownRecordError, match="not recorded in project alpha"):
+        redact(config, "alpha", "artifact", uuid.uuid4(), "origin", "secret", redaction_id=_ids.uuid7())
+    assert count(archivum, "SELECT count(*) FROM ulduar.redaction") == 1
+
+
+# --- re-applying removals (a rebuild's second step) ---
+
+
+def removal_redaction(record_id: uuid.UUID, history: str = "artifact", field: str = "origin") -> Redaction:
+    redaction_id = _ids.uuid7(ms_ago(2))
+    return Redaction(
+        redaction_id,
+        "alpha",
+        history,
+        record_id,
+        field,
+        "secret",
+        _ids.uuid7_time(redaction_id),  # type: ignore[arg-type]
+    )
+
+
+def removal_action(
+    days: int, rows_removed: int, rule_id: uuid.UUID | None = None, history: str = "artifact"
+) -> RetentionAction:
+    rule_id = rule_id or _ids.uuid7(ms_ago(40))
+    action_id = _ids.uuid7(ms_ago(1))
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    return RetentionAction(
+        action_id,
+        "alpha",
+        history,
+        rule_id,
+        days,
+        _ids.uuid7_time(rule_id),
+        cutoff,
+        rows_removed,
+        _ids.uuid7_time(action_id),
+    )
+
+
+def test_a_redaction_is_reapplied_under_its_id_once_and_a_missing_record_is_counted(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    with open_catalog(config) as catalog:
+        artifact = catalog.register_artifact("raw_file", CHECKSUM, 1, origin="a")
+        dataset = catalog.register_dataset("people", "jane")
+    wanted = removal_redaction(artifact.artifact_id)
+    named = removal_redaction(dataset.dataset_id, "dataset", "name")
+    absent = removal_redaction(uuid.uuid4())
+    assert reapply_removals(config, [wanted, named, absent]) == ReapplyResult(2, 0, 1)
+    assert reapply_removals(config, [wanted, named, absent]) == ReapplyResult(0, 2, 1)
+    with archivum.superuser() as su:
+        rows = su.execute(
+            "SELECT redaction_id, event_at, record_id FROM ulduar.redaction ORDER BY record_id"
+        ).fetchall()
+        name = su.execute("SELECT name FROM ulduar.dataset").fetchone()
+    assert sorted(rows) == sorted([(r.redaction_id, r.event_at, r.record_id) for r in (wanted, named)])
+    assert name == (f"redacted:{named.redaction_id}",)
+    with open_catalog(config) as catalog:
+        assert catalog.get_artifact(artifact.artifact_id).origin is None
+
+
+def test_a_history_retention_action_is_reapplied_with_its_rule_and_its_original_values(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    old, recent = old_artifacts(config, 300, 5)
+    first = removal_action(100, rows_removed=7)
+    second = removal_action(100, rows_removed=0, rule_id=first.rule_id)
+    assert reapply_removals(config, [first]) == ReapplyResult(1, 0, 0)
+    with open_catalog(config) as catalog:
+        assert [a.artifact_id for a in catalog.find_artifacts()] == [recent]  # what the cutoff covers is gone
+        assert old not in [a.artifact_id for a in catalog.find_artifacts()]
+    assert reapply_removals(config, [first, second]) == ReapplyResult(1, 1, 0)
+    with archivum.superuser() as su:
+        rules = su.execute("SELECT rule_id, history, keep_days, event_at FROM ulduar.history_retention_rule").fetchall()
+        actions = su.execute(
+            "SELECT action_id, event_at, rule_id, history, cutoff, rows_removed FROM ulduar.history_retention_action"
+            " ORDER BY action_id"
+        ).fetchall()
+    assert rules == [(first.rule_id, "artifact", 100, first.rule_event_at)]  # restored once, shared by both actions
+    assert actions == [
+        (a.action_id, a.event_at, a.rule_id, a.history, a.cutoff, a.rows_removed)
+        for a in sorted((first, second), key=lambda a: a.action_id)
+    ]
+
+
+def test_a_restored_rule_never_replaces_a_later_rule_as_the_one_in_force(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path)
+    declare_history_retention(config, "alpha", "artifact", 30)
+    older = removal_action(10, 0, rule_id=_ids.uuid7(ms_ago(40)))  # a rule declared before the one in force
+
+    def rules() -> list[tuple[int, uuid.UUID]]:
+        with archivum.superuser() as su:
+            return su.execute(
+                "SELECT keep_days, rule_id FROM ulduar.history_retention_rule ORDER BY recorded_at"
+            ).fetchall()
+
+    assert reapply_removals(config, [older]) == ReapplyResult(1, 0, 0)
+    found = rules()
+    assert [keep for keep, _ in found] == [30, 10, 30]  # the restored rule, then a new record that keeps the 30
+    assert found[1][1] == older.rule_id and found[2][1] not in (found[0][1], older.rule_id)
+    [result] = apply_history_retention(config)  # a dry run: the rule in force is the new record of the later one
+    assert result.rule_id == found[2][1]
+    assert reapply_removals(config, [older]) == ReapplyResult(0, 1, 0)
+    assert len(rules()) == 3  # nothing more is appended once the action is present
+
+
+def test_reapplying_refuses_an_unknown_project_and_anything_that_is_not_a_removal(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    assert reapply_removals(config, []) == ReapplyResult(0, 0, 0)
+    with pytest.raises(UnknownRecordError, match="Project nowhere is not onboarded"):
+        reapply_removals(config, [dataclasses.replace(removal_redaction(uuid.uuid4()), project="nowhere")])
+    with pytest.raises(UnknownRecordError, match="Project nowhere is not onboarded"):
+        reapply_removals(config, [dataclasses.replace(removal_action(10, 0), project="nowhere")])
+    with pytest.raises(ValueError, match="neither a Redaction nor a RetentionAction"):
+        reapply_removals(config, ["redact everything"])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="History 'dataset' is not one of"):
+        reapply_removals(config, [removal_action(10, 0, history="dataset")])
+    assert count(archivum, "SELECT count(*) FROM ulduar.history_retention_action") == 0
+
+
+def test_a_recording_role_reads_the_redactions_and_actions_of_its_own_project_only(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    alpha, beta = onboarded(archivum, tmp_path, "alpha"), onboarded(archivum, tmp_path, "beta")
+    for config, name in ((alpha, "alpha"), (beta, "beta")):
+        [artifact] = old_artifacts(config, 300)
+        redact(config, name, "artifact", artifact, "origin", "secret")
+        declare_history_retention(config, name, "artifact", 100)
+    assert len(apply_history_retention(alpha, dry_run=False)) == 2
+    for config in (alpha, beta):
+        with open_catalog(config) as catalog:
+            seen = catalog.transaction(
+                "Counting the redactions and actions",
+                lambda tx: (
+                    tx.execute("SELECT count(*), count(DISTINCT project_id) FROM ulduar.redaction").fetchone(),
+                    tx.execute(
+                        "SELECT count(*), count(DISTINCT project_id) FROM ulduar.history_retention_action"
+                    ).fetchone(),
+                ),
+            )
+        assert seen == ((1, 1), (1, 1))  # one row each, and all of them the role's own project's
+    env = recorder_of(archivum, alpha).env
+    assert isinstance(failure(alpha, env, "DELETE FROM ulduar.redaction"), psycopg.errors.InsufficientPrivilege)
+    assert isinstance(
+        failure(alpha, env, "INSERT INTO ulduar.history_retention_action (project_id) VALUES (gen_random_uuid())"),
+        psycopg.errors.InsufficientPrivilege,
+    )
 
 
 # --- retention and redaction records are never removed ---

@@ -102,6 +102,25 @@ class LineageEdge:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionAction:
+    """A recorded application of a history-retention rule: the rows of *history* older than *cutoff* were removed.
+
+    *keep_days* and *rule_event_at* are the applied rule's (*rule_id*); *rows_removed* is how many rows went;
+    *event_at* is the time inside *action_id*.
+    """
+
+    action_id: UUID
+    project: str
+    history: str
+    rule_id: UUID
+    keep_days: int | None
+    rule_event_at: datetime
+    cutoff: datetime
+    rows_removed: int
+    event_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class LineageNode:
     """A node reached by a lineage walk, *depth* edges from the node it started at (at least 1)."""
 

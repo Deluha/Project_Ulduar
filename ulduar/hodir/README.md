@@ -5,21 +5,27 @@
 Hodir is the cold archive: immutable, content-addressed storage of files, database dumps, reports and models
 (hard rule 5). The package holds the storage interface and its two backends (a bucket on an S3-compatible server and
 a local directory), the object layout, and the public surface so far: `open_archive` with `put_file`, `put_stream`,
-`get`, `get_stream` and `verify`, and the retention calls `declare_retention` and `apply_retention`. The reconcile,
-rebuild, clean-up and purge calls arrive in later Phase 2 commits.
+`get`, `get_stream`, `verify`, `reconcile` and `rebuild`, the retention calls `declare_retention` and
+`apply_retention`, and `clean_incomplete`, the built-in rule for what an interrupted put left behind. The purge call
+arrives in a later Phase 2 commit.
 
 ## Files & entry points
 
 | File | Holds |
 |---|---|
-| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `declare_retention`, `apply_retention`, `ArchiveRetentionRule`, `RetentionRun`, `DueAddress`, `OpenIntent`, `DeletionOutcome` |
-| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`, `get`, `get_stream`, `verify`) and `PutSink` |
+| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`, `declare_retention`, `apply_retention`, `ArchiveRetentionRule`, `RetentionRun`, `DueAddress`, `OpenIntent`, `DeletionOutcome`, `clean_incomplete`, `CleanupRun`, `Adoption`, `Orphan`, `UnfinishedUpload` |
+| `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`) and `PutSink` |
 | `retention.py` | `declare_retention`, `apply_retention` and the pure `due_addresses` |
+| `cleanup.py` | `clean_incomplete`, the built-in incomplete-put rule (D38) |
+| `_reconcile.py` | Private: `scan` (one scope's live addresses and store listing, with the database's clock and the grace cutoff) and `reconcile` |
+| `_rebuild.py` | Private: `rebuild`, the restore of deletion records and registrations from the store (D32, H28) |
+| `_registration.py` | Private: `register_object` (the one registration step a put, an adoption and a rebuild share), `unregistered_manifests`, `adopt_manifest` |
+| `_sync.py` | Private: `sync_records`, the record sweep |
 | `_deletion.py` | Private: `delete_address`, the one deletion protocol (retention now; the incomplete-put clean-up and the purge later) |
-| `_records.py` | Private: the records Hodir returns (`Finding`, `Verification`, `ArchiveRetentionRule`, `DueAddress`, `OpenIntent`, `DeletionOutcome`, `RetentionRun`, re-exported by the facade), the two rows retention reads, and `CHECK_OUTCOMES` |
-| `_layout.py` | Private: the one home of the object layout: the keys, the format marker, the layout text, the `Manifest` and the `DeletionRecord` |
-| `_archivum.py` | Private: Hodir's SQL, the locks, the registration insert, the archived check, the scope check, the verification and retention reads and writes and the deletion rows |
-| `_store.py` | Private: the `WritingStore` and `DeletingStore` protocols, `StoredObject`, `UnfinishedUpload`, `open_store`, `check_key` (the one key validator), `check_size`, `part_size`, `open_regular` and the size constants |
+| `_records.py` | Private: the records Hodir returns (`Finding`, `Verification`, `Reconciliation`, `ArchiveRetentionRule`, `DueAddress`, `OpenIntent`, `DeletionOutcome`, `RetentionRun`, `Orphan`, `Adoption`, `CleanupRun`, `Rebuild`, re-exported by the facade), the two rows retention reads, and `CHECK_OUTCOMES` |
+| `_layout.py` | Private: the one home of the object layout: the keys and their readers (`parse_object_key`, `parse_manifest_key`, `parse_record_key`), the format marker, the layout text, the `Manifest` and the three maintenance records (`DeletionRecord`, `RedactionRecord`, `HistoryRetentionRecord`, read by `decode_record`) |
+| `_archivum.py` | Private: Hodir's SQL, the locks, the registration insert, the archived check, the scope check, the check and retention reads and writes, the deletion rows, and the reads the sweep and a rebuild make (the three kinds of record, a dataset by id, the project's scopes) |
+| `_store.py` | Private: the `WritingStore` and `DeletingStore` protocols, `StoredObject`, `UnfinishedUpload(key, upload_id, started)`, `open_store`, `read_small`, `check_key` (the one key validator), `check_size`, `part_size`, `open_regular` and the size constants |
 | `_directory.py` | Private: `DirectoryStore` and `DirectoryDeletingStore` |
 | `_s3.py` | Private: `S3Store` and `S3DeletingStore` on a boto3 client, the transport guard `check_endpoint`, the error translation |
 
@@ -37,7 +43,7 @@ All keys are relative to the store's prefix (`[archive] prefix`), with `<project
 | `LAYOUT.txt` | A plain-text description of this layout, written once beside the marker |
 | `<project>/<scope>/_objects/sha256/<h[0:2]>/<h>` | The object: its bytes, named by the SHA-256 of those bytes in lower-case hex; written once, never overwritten |
 | `<project>/<scope>/_manifests/<yyyy>/<mm>/<artifact_id>.json` | One manifest per registration (month of the artifact id, UTC) |
-| `<project>/_records/<yyyy>/<mm>/<record_id>.json` | Maintenance records: a deletion's intent and its outcome (later commits add the others) |
+| `<project>/_records/<yyyy>/<mm>/<record_id>.json` | Maintenance records: a deletion's intent and its outcome, a redaction, a history-retention action (a purge joins them later) |
 
 A manifest is canonical JSON (sorted keys, no spaces, a trailing newline): `format` 1, `artifact_id`, `event_at`
 (ISO 8601 UTC with milliseconds and `Z`), `project`, `scope`, `kind`, `checksum` (`sha256:<hex>`), `size`,
@@ -51,6 +57,15 @@ name, not the id), `scope`, `checksum` (`sha256:<hex>`), `size`, `stage` (`inten
 `intent_id` (null for an intent), `cause`, `rule_id` (set exactly for a retention deletion) and `reason` (set exactly
 for a purge); times are ISO 8601 UTC with milliseconds and `Z`. `DeletionRecord.decode` is as strict as the manifest's
 and also refuses a stage, cause, intent, rule and reason that do not agree.
+
+The other two records (H4) are canonical JSON of the same kind and as strict, one file per row, named by its own id:
+a `redaction` record (`format` 1, `type` `redaction`, `redaction_id`, `event_at`, `project`, `history`, `record_id` (the
+redacted record's), `field`, `reason`) and a `history_retention_action` record (`format` 1, `type`
+`history_retention_action`, `action_id`, `event_at`, `project`, `history`, `rule_id`, the rule's `keep_days` and
+`rule_event_at`, `cutoff`, `rows_removed`). They hold ids, names, reasons, counts and times and never a removed value.
+`cutoff` is written to the microsecond, because the rows an action removed are those older than it; every other
+time is in milliseconds. `decode_record(data)` reads a record by its `type` (an unknown one is an `ArchiveFormatError`).
+A manifest's `kind` must be one of the artifact kinds.
 
 ### Opening and putting
 
@@ -128,7 +143,7 @@ and also refuses a stage, cause, intent, rule and reason that do not agree.
   storage class that cannot be read now; the object is not read), `unreadable` (the store refused it as an
   `IntegrityError`: a link or special file where the object belongs), `mismatch` (the SHA-256 or the size of the
   bytes read differs from the record) or `passed`. The other three outcomes of `CHECK_OUTCOMES`
-  (`object_without_entry`, `entry_without_object`, `unfinished_upload`) belong to reconciliation (later commit).
+  (`object_without_entry`, `entry_without_object`, `unfinished_upload`) belong to reconciliation (below).
   `ArchiveUnavailable` propagates, and nothing is recorded. The read-hash loop is the one `get` uses.
 - The check id is made at the start; each finding id as its object is judged. At the end one catalog transaction
   (with the check's and findings' times, so a missing monthly partition is made and the work run again) writes one
@@ -137,7 +152,7 @@ and also refuses a stage, cause, intent, rule and reason that do not agree.
   rotation reads them). A scope of the project nothing was archived in verifies 0 objects and still records the check.
 - `Verification(check_id, scope, mode, objects_checked, findings, event_at)` has a `failed` property (the findings
   other than `passed`); `Finding(finding_id, scope, checksum, size, outcome)` holds the recorded checksum and size.
-  Both are frozen; they carry no content and no name.
+  Both are frozen; they carry no content and no name. A verification ends with the record sweep (below).
 - Logs (`ulduar.hodir.archive`): one `info` summary (scope, mode, checked, failed) and one `warning` per finding
   that is not `passed` with the first 12 hex digits of the checksum and the outcome.
 
@@ -167,7 +182,8 @@ and also refuses a stage, cause, intent, rule and reason that do not agree.
   `[archive]` (`ConfigurationError`), a timezone-aware *now* (default: the current time; `ValueError`) and a *scope*
   the project has (`ValueError` for a bad name, `UnknownRecordError`; default: every scope). It reads the registrations
   and rules in one catalog transaction as the recording role. A dry run returns `RetentionRun(dry_run=True, due, ())`
-  and opens no store: it needs no deleter credential and no archive that exists. A real run opens the deleting
+  and deletes nothing: it opens the writing store (and checks the marker), to copy the records the store lacks, so it
+  needs no deleter credential but an archive that exists. A real run opens the deleting
   store with the `deleter` credential (`ConfigurationError` without it, for s3) and checks the format marker, and
   refuses, before deleting anything, to delete more objects than `archive.max_deletions_per_run` (default 100) unless
   `allow_over_limit=True` (`UlduarError`). Each due object then goes through the deletion protocol with cause
@@ -181,7 +197,89 @@ and also refuses a stage, cause, intent, rule and reason that do not agree.
   checksum, scope, stage) and one summary line. `RetentionRun(dry_run, due, outcomes, open_intents)`, the outcomes of
   the open intents ahead of those of the due objects; a
   `DeletionOutcome(scope, checksum, size, deletion_id, stage, cause, detail)` has the stage `confirmed`, `cancelled`,
-  `open` or `skipped` and, but for `confirmed`, says why in `detail`.
+  `open` or `skipped` and, but for `confirmed`, says why in `detail`. Either kind of run ends with the record sweep.
+
+### Reconcile
+
+- `reconcile(*, scope=None) -> Reconciliation` compares the store with the Archivum for one scope (default: the
+  session's; `ValueError` for a bad name, `UnknownRecordError` for one the project lacks, before any listing). In
+  one transaction it reads the database's clock (`SELECT now()`, never the client's) and the scope's live addresses,
+  then lists the objects under `<project>/<scope>/_objects/sha256` and the unfinished uploads under
+  `<project>/<scope>`. The Archivum is read first: a put writes its object before its registration (D31), so an
+  object listed afterwards is registered, young, or an orphan; reading the store first would report a put that
+  finished meanwhile as an entry without its object. `grace` is `archive.incomplete_put_grace_hours` (default 168,
+  at least 24), compared with the store's own modification time (a bucket's last-modified, a file's mtime).
+- Findings: `object_without_entry` (an object whose address is not live and whose age exceeds the grace; a key under
+  `_objects` that does not parse as an object key counts too, with no checksum and no size), `entry_without_object`
+  (a live address the store does not hold; no grace, because the object is written before the registration) and
+  `unfinished_upload` (an interrupted put's leftover older than the grace: a bucket's unfinished multipart upload,
+  a directory's `.tmp-` file; its checksum when its key parses, else none). Younger objects and uploads are not
+  judged, only counted (`skipped_young`). An agreement records no finding: a reconciliation's `archive_finding`
+  rows are the disagreements, and `archive_check` (`kind` `reconciliation`, `mode` `full`, `objects_checked` the
+  objects listed, `findings` their number) is recorded in one catalog transaction with them.
+- `Reconciliation(check_id, scope, objects_listed, skipped_young, findings, event_at)`. One `warning` per finding
+  and one `info` summary (`ulduar.hodir._reconcile`); a reconciliation ends with the record sweep.
+
+### The incomplete-put rule (`clean_incomplete`)
+
+- `clean_incomplete(config, *, dry_run=True, scope=None) -> CleanupRun` is the rule of D38, built in and not
+  declared: scope default is every scope of the project. It opens the writing store for a dry run (it only lists
+  and reads) and the deleting store with the `deleter` credential for a real one, checks the marker, and reads each
+  scope as `reconcile` does (same grace, the database's clock).
+- It reads the scope's manifests once; the artifact ids with a registration are known, and only the other
+  manifests (the *unregistered* ones) are read and decoded. A manifest that does not decode, or names another
+  project, scope or artifact than its key does, is an `ArchiveFormatError` naming the key (never the content),
+  before anything is changed: what it names might be adoptable, so nothing is removed on its absence.
+- **Adopt**: an unregistered manifest older than the grace whose object exists with the manifest's size. The artifact
+  is the catalog's own when it holds the id (its origin and dataset are kept; a manifest never holds an origin), else
+  registered from the manifest under its id (`kind`, `checksum`, `size`, `scope`, and the dataset when the Archivum
+  holds that id in that scope, else none, counted in `datasets_missing`); then the registration is made under the
+  address lock by the step a put ends with (`_registration.register_object`) with the manifest's retention class.
+- **Remove**: an object older than the grace that is not live (also not after the adoptions) and that no
+  unregistered manifest, however young, names. It goes through the deletion protocol with cause `incomplete_put`,
+  no rule, no manifests to remove, and a `still_due` that asks, under the address lock, that no registration of the
+  address is live and the object (if the store still has it) is past the grace: a put that registered it meanwhile
+  cancels the deletion. The record is the same as any deletion: intent, store record, outcome, store record.
+- **Abort**: an unfinished upload older than the grace, `abort_unfinished`, a real run only. A real run also
+  settles the open intents of cause `incomplete_put` in the scopes through the same protocol, ahead of the new
+  removals (their `still_due` decides: a live registration or a young object cancels them); a dry run lists them.
+- `CleanupRun(dry_run, adopt, remove, abort, open_intents, outcomes, adopted, datasets_missing)`: the first four are
+  the listing (a dry run fills only these): `Adoption(artifact_id, scope, checksum, size)`, `Orphan(scope,
+  checksum, size)` (also the open intents' objects), the `UnfinishedUpload`s. `outcomes` are the deletions, `adopted`
+  the artifacts registered (an adoption whose object vanished is logged and left out). A real run adopts first, then
+  removes, then aborts, and ends, like a dry run, with the record sweep. `archive.max_deletions_per_run` does not apply.
+
+### Rebuild
+
+- `rebuild(*, since=None) -> Rebuild` rebuilds a lost Archivum from the store alone, as the recording role with the
+  writing store. The project and its scopes must be onboarded first (the scopes are the Archivum's: a deletion record
+  of another is `UnknownRecordError`, before anything is changed). `since` (timezone-aware) reads only the months of
+  `_records/` and `_manifests/` from its month on.
+- Order matters. Whether an object is archived compares the `recorded_at` of a registration with that of a confirmed
+  deletion of its content, and the database stamps both with its own clock when the row is inserted, whatever the
+  record says. So **first** the deletion records of `<project>/_records` the Archivum lacks (by `deletion_id`) are
+  inserted, with their original ids and `event_at`, intents before outcomes in one transaction (an outcome whose
+  intent is neither in the Archivum nor read is a `UlduarError`: read from an earlier month); **then** every
+  unregistered manifest whose object exists is adopted as `clean_incomplete` adopts it, with no grace period. A
+  registration made after the deletions is newer than all of them, as a put made after a deletion is, so content
+  deleted and archived again comes back live; done the other way round, it would be deleted again.
+- A record or manifest that does not decode is an `ArchiveFormatError` naming its key; the records are all read
+  before any is restored. A manifest whose object is gone is left. Rebuilding again changes nothing.
+- The redactions and history-retention actions found are not applied (the recording role cannot): they come back as
+  `Rebuild.removals`, Freya records (`Redaction`, `RetentionAction`) in event order, for `freya.reapply_removals`,
+  which the ledger role runs afterwards. `Rebuild(deletions_restored, adopted, datasets_missing, removals)`; a
+  rebuilt artifact has no origin and, when its dataset id is not in the new Archivum (a dataset is not in the store),
+  no dataset (`datasets_missing`).
+
+### The record sweep
+
+- `_sync.sync_records(catalog, store) -> int` lists `<project>/_records` once and writes, with `put_bytes_new`, every
+  deletion, redaction and history-retention action of the project whose key is absent; it returns how many it wrote.
+  `verify`, `reconcile`, `clean_incomplete` and `apply_retention` (a dry run too: writing records needs only the
+  writer) end with it, and a later purge will. The Archivum is the authority and the store its copy (D32), so the
+  sweep never fails a call: a store or Archivum error (`UlduarError`) is logged as a `warning`
+  (`ulduar.hodir._sync`) and the call's own result stands; the next call catches up. The recording role reads the
+  two Freya tables through the grants of step 2.
 
 ### The deletion protocol (`_deletion.delete_address`)
 
@@ -278,15 +376,18 @@ session's connection (`Catalog.transaction`, the recording role); the credential
 
 - Public: `open_archive(config)` (a context manager yielding `Archive`), `Archive.project`, `Archive.scope`,
   `Archive.put_file(...)`, `Archive.put_stream(...)`, `PutSink` (`write`, `commit`), `Archive.get(...)`,
-  `Archive.get_stream(...)`, `Archive.verify(...)`, `Verification` and `Finding`, as described above; and
-  `declare_retention(...)`, `apply_retention(...)` with `ArchiveRetentionRule`, `RetentionRun`, `DueAddress`, `OpenIntent` and
-  `DeletionOutcome`, which take a `Config` and need no `Archive`.
+  `Archive.get_stream(...)`, `Archive.verify(...)`, `Archive.reconcile(...)`, `Archive.rebuild(...)`, `Verification`,
+  `Reconciliation`, `Rebuild` and `Finding`, as described above; and `declare_retention(...)`,
+  `apply_retention(...)` and `clean_incomplete(...)` with `ArchiveRetentionRule`, `RetentionRun`, `DueAddress`,
+  `OpenIntent`, `DeletionOutcome`, `CleanupRun`, `Adoption`, `Orphan` and `UnfinishedUpload`, which take a `Config`
+  and need no `Archive`.
   `Archive(catalog, store, settings)` is constructible directly (a test injects a wrapped store).
 - Private: `open_store`, `WritingStore`, `DeletingStore`, `StoredObject(key, size, modified, immediate)`,
-  `UnfinishedUpload(key, upload_id, started)`, `check_key`, the `_layout` functions, `Manifest` and `DeletionRecord`,
+  `check_key`, the `_layout` functions, `Manifest` and the three records,
   `_deletion.delete_address`.
 - Exceptions (`ulduar.errors`): `ArchiveUnavailable`, `IntegrityError` (also a get of a missing or mismatching
-  object), `ArchiveFormatError` (a foreign marker or version, a manifest that is not format 1), `UnknownRecordError`
+  object), `ArchiveFormatError` (a foreign marker or version, a manifest or record that is not format 1 or cannot be
+  read), `UnknownRecordError`
   (a scope the project lacks, for a put, a verification or retention; an unknown project when declaring; a get of an
   artifact that is not recorded or not in the archive), `UlduarError` (another manifest or retention class under a
   `record_id`, a stream past the spool limit, a shortening rule not confirmed, a retention run over its limit),
@@ -294,7 +395,9 @@ session's connection (`Catalog.transaction`, the recording role); the credential
   for no `[archive]`, an unset variable a setting names, a missing directory, a refused endpoint, a missing
   `deleter` or a missing extra.
 - Library log lines (loggers `ulduar.hodir.*`): `info` per put and per get (`archive`), per declared rule, per
-  retention outcome and one summary per run (`retention`), `debug` per stored object and deletion, `warning` for a
+  retention outcome and one summary per run (`retention`), per cleanup deletion and summary (`cleanup`), per adopted
+  artifact (`_registration`), per reconciliation and a `warning` per finding (`_reconcile`), per rebuild summary
+  (`_rebuild`), per sweep that wrote records (`_sync`), `debug` per stored object and deletion, `warning` for a
   skipped link, a failed abort, a verification finding, a deletion that stays open or an outcome record that was not
   written (`_deletion`); none carries a credential or an address.
 
@@ -306,4 +409,4 @@ to a writing class (hard rule 5); the object layout and checksum definition are 
 
 ## See also
 
-`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py` · `../../tests/test_hodir_get.py` · `../../tests/test_hodir_verify.py` · `../../tests/test_hodir_retention.py`
+`../README.md` · `../freya/README.md` · `../../ROADMAP.md` (Phase 2) · `../../tests/test_hodir_store.py` · `../../tests/test_hodir_put.py` · `../../tests/test_hodir_get.py` · `../../tests/test_hodir_verify.py` · `../../tests/test_hodir_retention.py` · `../../tests/test_hodir_reconcile.py`

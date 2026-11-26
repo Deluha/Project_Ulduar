@@ -232,16 +232,23 @@ def test_the_facade_exports_exactly_the_session_surface() -> None:
     from ulduar import hodir
 
     assert sorted(hodir.__all__) == [
+        "Adoption",
         "Archive",
         "ArchiveRetentionRule",
+        "CleanupRun",
         "DeletionOutcome",
         "DueAddress",
         "Finding",
         "OpenIntent",
+        "Orphan",
         "PutSink",
+        "Rebuild",
+        "Reconciliation",
         "RetentionRun",
+        "UnfinishedUpload",
         "Verification",
         "apply_retention",
+        "clean_incomplete",
         "declare_retention",
         "open_archive",
     ]

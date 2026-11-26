@@ -1,8 +1,9 @@
 """Ledger-role calls on the Archivum's history: onboarding, retention rules and their application, redaction.
 
 Input: a `Config` whose `archivum.ledger_dsn_env` names the ledger role's connection string
-(`ConfigurationError` otherwise). Output: the frozen records `RetentionRule`, `RetentionResult`, `Redaction`
-and the `Project` an onboarding returns. Each call runs in one transaction after the schema check.
+(`ConfigurationError` otherwise). Output: the frozen records `RetentionRule`, `RetentionResult`, `Redaction`,
+`ReapplyResult` and the `Project` an onboarding returns. Each call runs in one transaction after the schema check
+(`reapply_removals` one per removal).
 
 This module is the only code path that issues `UPDATE` or `DELETE` against recorded history (hard rule 5):
 a retention delete under `ulduar.maintenance` = `retention`, and a redaction under `redaction`, both
@@ -29,7 +30,7 @@ from ulduar import _db, _ids
 from ulduar.config import DEFAULT_SCOPE, ArchivumSettings, Config, check_name
 from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import ledger
-from ulduar.freya._records import Connection, Project, qualified
+from ulduar.freya._records import Connection, Project, RetentionAction, qualified
 from ulduar.freya.ledger import ledger_transaction
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,16 @@ _INSERT_ACTION = sql.SQL(
     "INSERT INTO {} (project_id, action_id, event_at, rule_id, history, cutoff, rows_removed)"
     " VALUES (%s, %s, %s, %s, %s, %s, %s)"
 ).format(_ACTION)
+_SELECT_ACTION = sql.SQL("SELECT 1 FROM {} WHERE project_id = %s AND action_id = %s").format(_ACTION)
+_SELECT_RULE = sql.SQL("SELECT 1 FROM {} WHERE project_id = %s AND rule_id = %s").format(_RULE)
+# The rule in force for a project and history: the one recorded last, as `_LATEST_RULES` orders them.
+_RULE_IN_FORCE = sql.SQL(
+    "SELECT rule_id, keep_days, event_at FROM {} WHERE project_id = %s AND history = %s"
+    " ORDER BY recorded_at DESC, event_at DESC, rule_id DESC LIMIT 1"
+).format(_RULE)
+_SELECT_REDACTION = sql.SQL(
+    "SELECT history, record_id, field, reason FROM {} WHERE project_id = %s AND redaction_id = %s"
+).format(_REDACTION)
 _INSERT_REDACTION = sql.SQL(
     "INSERT INTO {} (project_id, redaction_id, event_at, history, record_id, field, reason)"
     " VALUES (%s, %s, %s, %s, %s, %s, %s)"
@@ -124,6 +135,15 @@ class Redaction:
     field: str
     reason: RedactionReason
     event_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReapplyResult:
+    """What `reapply_removals` did: removals applied, found already recorded, or skipped for want of their record."""
+
+    applied: int
+    already_present: int
+    missing_targets: int
 
 
 def _scalar(cursor: Cursor[TupleRow]) -> Any:
@@ -261,14 +281,19 @@ _DELETE_ARTIFACTS = sql.SQL(
 ).format(artifact=qualified("artifact"), archived=_IS_ARCHIVED, registration=_REGISTRATION)
 
 
+def _remove_rows(tx: Connection, project_id: UUID, history: str, cutoff: datetime) -> int:
+    """Delete the project's rows of *history* older than *cutoff*; the one deletion every retention path shares."""
+    _maintenance(tx, RETENTION_MODE)
+    if history == "artifact":
+        removed: int = _scalar(tx.execute(_DELETE_ARTIFACTS, (project_id, cutoff)))
+        return removed
+    query = sql.SQL("DELETE FROM {} WHERE project_id = %s AND event_at < %s").format(_table(history))
+    return tx.execute(query, (project_id, cutoff)).rowcount
+
+
 def _delete_older(tx: Connection, rule: _LimitedRule, cutoff: datetime) -> int:
     """Delete the project rows of the rule history older than *cutoff* and append the action record, atomically."""
-    _maintenance(tx, RETENTION_MODE)
-    if rule.history == "artifact":
-        removed: int = _scalar(tx.execute(_DELETE_ARTIFACTS, (rule.project_id, cutoff)))
-    else:
-        query = sql.SQL("DELETE FROM {} WHERE project_id = %s AND event_at < %s").format(_table(rule.history))
-        removed = tx.execute(query, (rule.project_id, cutoff)).rowcount
+    removed = _remove_rows(tx, rule.project_id, rule.history, cutoff)
     action_id = _ids.uuid7()
     params = (rule.project_id, action_id, _ids.uuid7_time(action_id), rule.rule_id, rule.history, cutoff, removed)
     tx.execute(_INSERT_ACTION, params)
@@ -343,6 +368,42 @@ def apply_history_retention(
     return results
 
 
+def _apply_redaction(tx: Connection, project_id: UUID, redaction: Redaction) -> bool:
+    """Make the change *redaction* describes and append its record; False (nothing recorded) if the record is absent."""
+    _maintenance(tx, REDACTION_MODE)
+    value = None if redaction.history == "artifact" else f"{_REDACTED_PREFIX}{redaction.redaction_id}"
+    update = sql.SQL("UPDATE {table} SET {field} = %s WHERE project_id = %s AND {id} = %s").format(
+        table=_table(redaction.history),
+        field=sql.Identifier(redaction.field),
+        id=sql.Identifier(_ID_COLUMNS[redaction.history]),
+    )
+    if tx.execute(update, (value, project_id, redaction.record_id)).rowcount != 1:
+        return False
+    tx.execute(
+        _INSERT_REDACTION,
+        (
+            project_id,
+            redaction.redaction_id,
+            redaction.event_at,
+            redaction.history,
+            redaction.record_id,
+            redaction.field,
+            redaction.reason,
+        ),
+    )
+    return True
+
+
+def _is_recorded(tx: Connection, project_id: UUID, redaction: Redaction) -> bool:
+    """True when a redaction is recorded under the id of *redaction*; `UlduarError` when it has other content."""
+    row = tx.execute(_SELECT_REDACTION, (project_id, redaction.redaction_id)).fetchone()
+    if row is None:
+        return False
+    if tuple(row) != (redaction.history, redaction.record_id, redaction.field, redaction.reason):
+        raise UlduarError(f"Redaction {redaction.redaction_id} is already recorded with different content")
+    return True
+
+
 def redact(
     config: Config,
     project: str,
@@ -350,30 +411,108 @@ def redact(
     record_id: UUID,
     field: str,
     reason: RedactionReason,
+    *,
+    redaction_id: UUID | None = None,
 ) -> Redaction:
     """Redact one field of one record and record the redaction; the record itself stays.
 
     Allowed: `artifact.origin` (becomes NULL), `dataset.name` and `dataset.namespace` (become
     `redacted:<redaction id>`); anything else is a `ValueError`. `UnknownRecordError` when the project has no
-    such record. The change and the appended `redaction` record commit together.
+    such record. The change and the appended `redaction` record commit together. *redaction_id* (a UUIDv7;
+    `record_id` is the redacted record's) makes the call idempotent and is what a rebuild re-applies a
+    redaction under: one already recorded under it with the same content is returned as stored, with other
+    content it raises `UlduarError`; the redaction's `event_at` is the time of its id.
     """
     if field not in REDACTABLE_FIELDS.get(history, ()):
         raise ValueError(f"{history}.{field} cannot be redacted")
     if reason not in REDACTION_REASONS:
         raise ValueError(f"Reason {reason!r} is not one of {', '.join(REDACTION_REASONS)}")
-    redaction_id = _ids.uuid7()
-    value = None if history == "artifact" else f"{_REDACTED_PREFIX}{redaction_id}"
+    redaction_id = _ids.uuid7() if redaction_id is None else redaction_id
+    redaction = Redaction(
+        redaction_id, project, history, record_id, field, reason, _ids.uuid7_time(redaction_id)
+    )  # ValueError naming the id when it is not a version 7 UUID
     with ledger_transaction(config, f"Redacting {history} {record_id}", purpose="redaction") as tx:
         project_id = lookup_project_id(tx, project)
-        _maintenance(tx, REDACTION_MODE)
-        update = sql.SQL("UPDATE {table} SET {field} = %s WHERE project_id = %s AND {id} = %s").format(
-            table=_table(history), field=sql.Identifier(field), id=sql.Identifier(_ID_COLUMNS[history])
-        )
-        if tx.execute(update, (value, project_id, record_id)).rowcount != 1:
+        if _is_recorded(tx, project_id, redaction):
+            return redaction
+        if not _apply_redaction(tx, project_id, redaction):
             raise UnknownRecordError(f"The {history} {record_id} is not recorded in project {project}")
-        tx.execute(
-            _INSERT_REDACTION,
-            (project_id, redaction_id, _ids.uuid7_time(redaction_id), history, record_id, field, reason),
-        )
     logger.info("redacted %s.%s of project %s", history, field, project)
-    return Redaction(redaction_id, project, history, record_id, field, reason, _ids.uuid7_time(redaction_id))
+    return redaction
+
+
+def _reapply_redaction(tx: Connection, project_id: UUID, redaction: Redaction) -> str:
+    if _is_recorded(tx, project_id, redaction):
+        return "already_present"
+    return "applied" if _apply_redaction(tx, project_id, redaction) else "missing_target"
+
+
+def _restore_rule(tx: Connection, project_id: UUID, action: RetentionAction) -> None:
+    """Insert the rule *action* applied, without letting it replace a later rule as the one in force.
+
+    The database stamps the restored rule's `recorded_at` with its own now, so it would win over a rule the
+    Archivum already holds. When that rule's `event_at` is later than the restored one's, a new rule record that
+    repeats its `keep_days` is appended right after (a correction by a new record, never an edit), so the rule in
+    force is unchanged.
+    """
+    in_force = tx.execute(_RULE_IN_FORCE, (project_id, action.history)).fetchone()
+    tx.execute(_INSERT_RULE, (project_id, action.rule_id, action.rule_event_at, action.history, action.keep_days))
+    if in_force is None or in_force[2] <= action.rule_event_at:
+        return
+    rule_id = _ids.uuid7()
+    tx.execute(_INSERT_RULE, (project_id, rule_id, _ids.uuid7_time(rule_id), action.history, in_force[1]))
+    logger.info(
+        "restored retention rule %s of %s is older than the rule in force: its keep_days was declared again",
+        action.rule_id,
+        action.history,
+    )
+
+
+def _reapply_action(tx: Connection, project_id: UUID, action: RetentionAction) -> str:
+    """Remove the rows *action* removed (its rule restored first when the Archivum lacks it) and record it as it was."""
+    if action.history not in HISTORIES:
+        raise ValueError(f"History {action.history!r} is not one of {', '.join(HISTORIES)}")
+    _lock_retention(tx, project_id, action.history)
+    if tx.execute(_SELECT_ACTION, (project_id, action.action_id)).fetchone() is not None:
+        return "already_present"
+    if tx.execute(_SELECT_RULE, (project_id, action.rule_id)).fetchone() is None:
+        _restore_rule(tx, project_id, action)
+    _remove_rows(tx, project_id, action.history, action.cutoff)
+    params = (
+        project_id,
+        action.action_id,
+        action.event_at,
+        action.rule_id,
+        action.history,
+        action.cutoff,
+        action.rows_removed,
+    )
+    tx.execute(_INSERT_ACTION, params)
+    return "applied"
+
+
+def reapply_removals(config: Config, removals: Sequence[Redaction | RetentionAction]) -> ReapplyResult:
+    """Apply the redactions and history-retention actions of a rebuild that the Archivum lacks, under their ids.
+
+    One transaction (one connection, closed after) per removal, as the ledger role. A redaction already recorded
+    under its id is `already_present`; one whose redacted record the Archivum does not hold is `missing_targets`
+    and records nothing; otherwise it is made as `redact` makes it. An action already recorded under its id is
+    `already_present`; otherwise its rule is restored when the Archivum lacks it, the rows of its history older than
+    its cutoff are deleted exactly as `apply_history_retention` deletes them (an artifact whose object is archived
+    stays), and the action is recorded with its original id and values. `UnknownRecordError` for a removal whose
+    project is not onboarded; `ValueError` for anything but a `Redaction` or a `RetentionAction`.
+    Applying again changes nothing.
+    """
+    counts = {"applied": 0, "already_present": 0, "missing_target": 0}
+    for removal in removals:
+        if not isinstance(removal, Redaction | RetentionAction):
+            raise ValueError(f"{removal!r} is neither a Redaction nor a RetentionAction")
+        removal_id = removal.redaction_id if isinstance(removal, Redaction) else removal.action_id
+        with ledger_transaction(config, f"Re-applying removal {removal_id}", purpose="re-applying removals") as tx:
+            project_id = lookup_project_id(tx, removal.project)
+            if isinstance(removal, Redaction):
+                counts[_reapply_redaction(tx, project_id, removal)] += 1
+            else:
+                counts[_reapply_action(tx, project_id, removal)] += 1
+    logger.info("re-applied removals: %s", ", ".join(f"{n} {name}" for name, n in counts.items()))
+    return ReapplyResult(counts["applied"], counts["already_present"], counts["missing_target"])

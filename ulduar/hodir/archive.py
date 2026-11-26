@@ -24,6 +24,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, Literal
 from uuid import UUID, uuid4
@@ -33,21 +34,15 @@ from ulduar.config import ArchiveSettings, Config, check_name
 from ulduar.errors import ConfigurationError, IntegrityError, UlduarError, UnknownRecordError
 from ulduar.freya import Artifact, Catalog, Connection, Dataset, Project, open_catalog
 from ulduar.freya.catalog import check_kind, check_origin
-from ulduar.hodir import _archivum, _layout
-from ulduar.hodir._records import PASSED, Finding, Verification
-from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_regular, open_store
+from ulduar.hodir import _archivum, _layout, _rebuild, _reconcile
+from ulduar.hodir._records import PASSED, Finding, Rebuild, Reconciliation, Verification
+from ulduar.hodir._registration import register_object
+from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_regular, open_store, read_small
+from ulduar.hodir._sync import sync_records
 
 logger = logging.getLogger(__name__)
 
 BYTES_PER_GIB = 1024**3
-# What is read back of the marker and of a manifest: both are small, a larger object is not one.
-_SMALL_OBJECT_LIMIT = 1024**2
-_SHORT_CHECKSUM_HEX = 12
-
-
-def _read_small(store: WritingStore, key: str) -> bytes:
-    with store.read(key) as stream:
-        return stream.read(_SMALL_OBJECT_LIMIT + 1)[:_SMALL_OBJECT_LIMIT]
 
 
 def _hash_object(store: WritingStore, key: str, write: Callable[[bytes], object] | None = None) -> tuple[bytes, int]:
@@ -68,7 +63,7 @@ def _ensure_format(store: WritingStore) -> None:
     if store.head(_layout.FORMAT_MARKER_KEY) is None:
         store.put_bytes_new(_layout.FORMAT_MARKER_KEY, _layout.marker_bytes())
         store.put_bytes_new(_layout.LAYOUT_KEY, _layout.LAYOUT_TEXT.encode("utf-8"))
-    _layout.check_marker(_read_small(store, _layout.FORMAT_MARKER_KEY))
+    _layout.check_marker(read_small(store, _layout.FORMAT_MARKER_KEY))
 
 
 @contextmanager
@@ -330,7 +325,7 @@ class Archive:
             raise IntegrityError(f"Object {key} does not match its recorded size")
         if digest != artifact.checksum:
             raise IntegrityError(f"Object {key} does not match its recorded checksum")
-        short = artifact.checksum.hex()[:_SHORT_CHECKSUM_HEX]
+        short = _layout.short_checksum(artifact.checksum)
         logger.info("got artifact %s: %s, %d bytes", artifact.artifact_id, short, size)
         return size
 
@@ -367,18 +362,66 @@ class Archive:
         times = [check.event_at, *(_ids.uuid7_time(finding.finding_id) for finding in findings)]
         self._catalog.transaction(
             f"Recording verification {check_id}",
-            lambda tx: _archivum.insert_check(tx, project_id, check),
+            lambda tx: _archivum.insert_check(
+                tx,
+                project_id,
+                check_id=check_id,
+                scope=scope,
+                kind="verification",
+                mode=mode,
+                objects_checked=len(findings),
+                findings=findings,
+            ),
             event_ats=times,
         )
         logger.info("verified scope %s (%s): %d checked, %d failed", scope, mode, len(findings), len(check.failed))
+        sync_records(self._catalog, self._store)
         return check
+
+    def reconcile(self, *, scope: str | None = None) -> Reconciliation:
+        """Compare the store's objects in *scope* (default: the session's) with the live addresses, and record it.
+
+        `object_without_entry`: an object no live registration names, older than `archive.incomplete_put_grace_hours`
+        (an unparseable key under `_objects` too, with no checksum). `entry_without_object`: a live address the store
+        does not hold. `unfinished_upload`: an interrupted put's leftovers, older than the grace. Younger objects and
+        uploads are skipped and counted. The grace period is measured by the database's clock against the store's
+        modification time. One check of kind `reconciliation` and a finding per disagreement are recorded in one
+        transaction; records the Archivum holds that the store lacks are copied to it afterwards.
+        `ValueError` for a bad *scope*; `UnknownRecordError` for a scope the project lacks, before any listing.
+        """
+        scope = self.scope if scope is None else check_name(scope, "scope")
+        result = _reconcile.reconcile(self._catalog, self._store, self._settings.incomplete_put_grace_hours, scope)
+        sync_records(self._catalog, self._store)
+        return result
+
+    def rebuild(self, *, since: datetime | None = None) -> Rebuild:
+        """Restore, from the store alone, what a lost Archivum held: its deletion records, then its registrations.
+
+        First the deletion records of `<project>/_records` the Archivum lacks are inserted under their ids and
+        `event_at`; only then is every manifest without a registration, whose object exists, registered again
+        under its artifact id, retention class and kind (no grace period; its dataset when the Archivum holds
+        that id, else none, counted in `datasets_missing`; no origin, which a manifest never holds). The order
+        matters: whether an object is archived compares the database's `recorded_at` of its registration with a
+        confirmed deletion's, so a deletion restored after a registration would delete it again. The redactions and
+        history-retention actions found are returned in `removals`, not applied (the recording role cannot; pass
+        them to `freya.reapply_removals`). *since* (timezone-aware) reads only the months from its month on.
+        Running it again changes nothing. The scopes of the project are the Archivum's: onboard them first
+        (`UnknownRecordError` for a deletion record of another). `ValueError` for a naive *since*; `ArchiveFormatError`
+        for a record or manifest that cannot be read.
+        """
+        if since is not None and since.tzinfo is None:
+            raise ValueError("since must be a timezone-aware datetime")
+        return _rebuild.rebuild(self._catalog, self._store, since)
 
     def _judge(self, scope: str, checksum: bytes, size: int) -> Finding:
         key = _layout.object_key(self.project.name, scope, checksum)
         outcome = self._outcome(key, checksum, size)
         if outcome != PASSED:
             logger.warning(
-                "verification of scope %s: object %s is %s", scope, checksum.hex()[:_SHORT_CHECKSUM_HEX], outcome
+                "verification of scope %s: object %s is %s",
+                scope,
+                _layout.short_checksum(checksum),
+                outcome,
             )
         return Finding(_ids.uuid7(), scope, checksum, size, outcome)
 
@@ -415,14 +458,14 @@ class Archive:
             scope=request.scope,
             record_id=request.artifact_id,
         )
-        if not self._register(artifact, key, size, request.retention_class):
+        if not register_object(self._catalog, self._store, artifact, key, size, request.retention_class):
             # The object was deleted between the put and the registration: store it again, once.
             stored_new = self._store.put_new(key, path, size, sha256)
-            if not self._register(artifact, key, size, request.retention_class):
+            if not register_object(self._catalog, self._store, artifact, key, size, request.retention_class):
                 raise IntegrityError(f"Object {key} disappeared while it was being registered")
         logger.info(
             "archived %s (%d bytes) in scope %s, %s",
-            sha256.hex()[:_SHORT_CHECKSUM_HEX],
+            _layout.short_checksum(sha256),
             size,
             request.scope,
             "object stored" if stored_new else "object already stored",
@@ -445,19 +488,5 @@ class Archive:
         key = _layout.manifest_key(manifest.project, manifest.scope, manifest.artifact_id)
         if self._store.put_bytes_new(key, manifest.encode()):
             return
-        if _layout.Manifest.decode(_read_small(self._store, key)) != manifest:
+        if _layout.Manifest.decode(read_small(self._store, key)) != manifest:
             raise UlduarError(f"Artifact {manifest.artifact_id} already has a different manifest")
-
-    def _register(self, artifact: Artifact, key: str, size: int, retention_class: str | None) -> bool:
-        """Record the registration under the address lock if the object is there; False when it is not."""
-        project_id = self.project.project_id
-
-        def work(tx: Connection) -> bool:
-            _archivum.lock_address(tx, project_id, artifact.scope, artifact.checksum)
-            stored = self._store.head(key)
-            if stored is None or stored.size != size:
-                return False
-            _archivum.insert_registration(tx, project_id, artifact.scope, artifact, retention_class)
-            return True
-
-        return self._catalog.transaction(f"Registering archived artifact {artifact.artifact_id}", work)

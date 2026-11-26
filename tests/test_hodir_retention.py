@@ -555,7 +555,7 @@ def test_a_dry_run_lists_what_is_due_and_deletes_nothing(config: Config, archivu
     assert deletion_rows(archivum) == []
 
 
-def test_a_dry_run_opens_no_store_and_a_real_run_needs_the_deleter(
+def test_a_dry_run_opens_the_writing_store_only_and_a_real_run_needs_the_deleter(
     config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     due = put(config, tmp_path, b"due", days=OLD)
@@ -568,9 +568,10 @@ def test_a_dry_run_opens_no_store_and_a_real_run_needs_the_deleter(
             apply_retention(config, dry_run=False)
     else:
         assert config.archive.path is not None
-        config = replace(config, archive=replace(config.archive, path=config.archive.path / "gone"))
-        with pytest.raises(ConfigurationError, match="does not exist"):
-            apply_retention(config, dry_run=False)
+        gone = replace(config, archive=replace(config.archive, path=config.archive.path / "gone"))
+        for dry_run in (True, False):  # even a dry run opens the store, to copy the records it lacks
+            with pytest.raises(ConfigurationError, match="does not exist"):
+                apply_retention(gone, dry_run=dry_run)
     assert [d.checksum for d in apply_retention(config).due] == [due.checksum]
 
 

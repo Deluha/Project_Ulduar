@@ -228,7 +228,8 @@ CREATE POLICY ledger_all ON ulduar.archive_deletion TO PUBLIC USING (ulduar.is_l
 CREATE POLICY ledger_all ON ulduar.archive_check TO PUBLIC USING (ulduar.is_ledger_role()) WITH CHECK (ulduar.is_ledger_role());
 CREATE POLICY ledger_all ON ulduar.archive_finding TO PUBLIC USING (ulduar.is_ledger_role()) WITH CHECK (ulduar.is_ledger_role());
 
--- A recording role reads and inserts only its own project's rows; a retention rule it can only read.
+-- A recording role reads and inserts only its own project's rows; a retention rule, a redaction and a history-retention
+-- action it can only read.
 CREATE POLICY member_select ON ulduar.archive_registration FOR SELECT TO ulduar_recorder USING (project_id IN (SELECT ulduar.member_projects()));
 CREATE POLICY member_insert ON ulduar.archive_registration FOR INSERT TO ulduar_recorder WITH CHECK (project_id IN (SELECT ulduar.member_projects()));
 CREATE POLICY member_select ON ulduar.archive_deletion FOR SELECT TO ulduar_recorder USING (project_id IN (SELECT ulduar.member_projects()));
@@ -238,11 +239,15 @@ CREATE POLICY member_insert ON ulduar.archive_check FOR INSERT TO ulduar_recorde
 CREATE POLICY member_select ON ulduar.archive_finding FOR SELECT TO ulduar_recorder USING (project_id IN (SELECT ulduar.member_projects()));
 CREATE POLICY member_insert ON ulduar.archive_finding FOR INSERT TO ulduar_recorder WITH CHECK (project_id IN (SELECT ulduar.member_projects()));
 CREATE POLICY member_select ON ulduar.archive_retention_rule FOR SELECT TO ulduar_recorder USING (project_id IN (SELECT ulduar.member_projects()));
+-- Step 1's redaction and history-retention action records, readable by the recording role so it can copy them to the
+-- archive store (D32, H4): they hold ids, field names, reasons, counts and times, never a removed value.
+CREATE POLICY member_select ON ulduar.redaction FOR SELECT TO ulduar_recorder USING (project_id IN (SELECT ulduar.member_projects()));
+CREATE POLICY member_select ON ulduar.history_retention_action FOR SELECT TO ulduar_recorder USING (project_id IN (SELECT ulduar.member_projects()));
 
 -- Grants: nothing beyond select and insert (a rule: select only).
 GRANT SELECT, INSERT ON ulduar.archive_registration, ulduar.archive_deletion, ulduar.archive_check,
   ulduar.archive_finding TO ulduar_recorder;
-GRANT SELECT ON ulduar.archive_retention_rule TO ulduar_recorder;
+GRANT SELECT ON ulduar.archive_retention_rule, ulduar.redaction, ulduar.history_retention_action TO ulduar_recorder;
 REVOKE ALL ON FUNCTION ulduar.artifact_is_archived(uuid, uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ulduar.artifact_is_archived(uuid, uuid) TO ulduar_recorder;
 

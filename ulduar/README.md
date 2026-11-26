@@ -17,7 +17,7 @@ file or a stream.
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation (`translate`, `translated`, `translated_transaction`) |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
-| `hodir/` | Hodir's facade (`open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`: `put_file`, `put_stream`, `get`, `get_stream`, `verify`) and, private, the object layout, the storage interface with its directory and S3 backends (`hodir/README.md`) |
+| `hodir/` | Hodir's facade (`open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`: `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`; `declare_retention`, `apply_retention`, `clean_incomplete` and their records) and, private, the object layout, the storage interface with its directory and S3 backends (`hodir/README.md`) |
 | `freya/` | Freya's facade, schema ledger, SQL steps (the catalog, then the archive's tables), catalog session with its `transaction` hook, lineage and the ledger-role history calls (`freya/README.md`) |
 
 ## How it works
@@ -46,8 +46,8 @@ file or a stream.
   - Both backends: `backend` (required: `"s3"` or `"directory"`); `prefix` ("" or `/`-joined segments each
     matching `NAME_PATTERN`; default `ulduar`); `spool_dir` (an absolute path; default the system temporary
     directory); `spool_limit_gib` (100; 1–100000); `incomplete_put_grace_hours` (168; 24–8760);
-    `max_deletions_per_run` (100; 1–1000000). `incomplete_put_grace_hours` is validated now and used by a later
-    Phase 2 commit; `max_deletions_per_run` limits `apply_retention`.
+    `max_deletions_per_run` (100; 1–1000000). `incomplete_put_grace_hours` is the grace period of `Archive.reconcile` and
+    `clean_incomplete`; `max_deletions_per_run` limits `apply_retention`.
   - `directory` only: `path` (required, absolute; it must exist when the store opens). The s3-only keys
     below are refused.
   - `s3` only: `bucket` (required; S3 bucket naming, `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`); `region`
@@ -78,18 +78,18 @@ file or a stream.
   its flag, ledger lock); `UnknownRecordError`; `LineageCycleError`; `IsolationError` (refused by row-level security
   or privileges); `ArchiveUnavailable` (the archive store is unreachable, timed out or refused the credential);
   `IntegrityError` (an archived object does not match its checksum or size, or is missing or unreadable);
-  `ArchiveFormatError` (the store's format marker is foreign or of an unknown version, or a manifest is not format 1;
-  raised by `open_archive` and the manifest reader). A message names the object (project, variable, step, host) and
+  `ArchiveFormatError` (the store's format marker is foreign or of an unknown version, or a manifest or a maintenance
+  record is not format 1 or cannot be read; raised by `open_archive`, `clean_incomplete` and `rebuild`). A message names the object (project, variable, step, host) and
   never a connection string, a password or a credential's value.
 - One runtime dependency: `psycopg>=3.2,<4` (needs a system libpq 16 or newer; the extra
   `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision. One optional
   extra beside `binary`: `project-ulduar[s3]` (`boto3>=1.36,<2`), the S3 backend's client; without it
   `open_store` raises `ConfigurationError` for an s3 archive.
 - The public Freya surface (`ulduar.freya`: `open_catalog` with its register, find, lineage, ancestors and
-  descendants calls and the `transaction` hook, the onboarding, retention and redaction calls, the
+  descendants calls and the `transaction` hook, the onboarding, retention, redaction and `reapply_removals` calls, the
   `ledger_transaction` hook, and their records): `freya/README.md`. The public Hodir surface (`ulduar.hodir`:
-  `open_archive`, `put_file`, `put_stream`, `get`, `get_stream`, `verify`, and on a `Config` `declare_retention` and
-  `apply_retention`, with their records): `hodir/README.md`.
+  `open_archive`, `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`, and on a `Config`
+  `declare_retention`, `apply_retention` and `clean_incomplete`, with their records): `hodir/README.md`.
 - Logging: library code logs through loggers under `ulduar.*`, adds no handler and never touches the root
   logger.
 

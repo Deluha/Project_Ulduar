@@ -30,6 +30,8 @@ MULTIPART_THRESHOLD = 64 * MIB
 MIN_PART_SIZE = 64 * MIB
 MAX_PARTS = 10_000
 CHUNK_SIZE = MIB
+# What is read back of the marker, a manifest or a record: all are small, a larger object is not one.
+SMALL_OBJECT_LIMIT = MIB
 MAX_OBJECT_SIZE = 5 * 1024**4
 MAX_KEY_BYTES = 1024
 SHA256_BYTES = 32
@@ -100,6 +102,12 @@ class DeletingStore(WritingStore, Protocol):
     def any_version_left(self, key: str) -> bool:
         """True while any version (a delete marker does not count) of exactly this key remains."""
         ...
+
+
+def read_small(store: WritingStore, key: str) -> bytes:
+    """The first `SMALL_OBJECT_LIMIT` bytes of the object at *key* (a missing key is an `IntegrityError`)."""
+    with store.read(key) as stream:
+        return stream.read(SMALL_OBJECT_LIMIT + 1)[:SMALL_OBJECT_LIMIT]
 
 
 def check_key(key: str, *, allow_root: bool = False) -> str:

@@ -1,10 +1,10 @@
-"""The records Hodir returns: what a verification found, a retention rule, what retention is due or did.
+"""The records Hodir returns: what a check found, a retention rule, what retention, a cleanup or a rebuild did.
 
-Input: nothing; these are plain values. Output: `Finding`, `Verification` and the outcome vocabulary
-`CHECK_OUTCOMES`, which equals the list the Archivum's `archive_finding` table accepts (a test holds the two
-equal); `ArchiveRetentionRule`, `DueAddress`, `OpenIntent`, `DeletionOutcome` and `RetentionRun`; and the two rows
-retention reads, `LiveRegistration` and `LatestRule`. Private module; the facade `ulduar.hodir` re-exports the
-public records.
+Input: nothing; these are plain values. Output: `Finding`, `Verification`, `Reconciliation` and the outcome
+vocabulary `CHECK_OUTCOMES`, which equals the list the Archivum's `archive_finding` table accepts (a test holds the
+two equal); `ArchiveRetentionRule`, `DueAddress`, `OpenIntent`, `DeletionOutcome` and `RetentionRun`; `Orphan`,
+`Adoption` and `CleanupRun` (the built-in incomplete-put rule); `Rebuild`; and the two rows retention reads,
+`LiveRegistration` and `LatestRule`. Private module; the facade `ulduar.hodir` re-exports the public records.
 """
 
 from __future__ import annotations
@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, NamedTuple
 from uuid import UUID
+
+from ulduar.freya import Artifact, Redaction, RetentionAction
+from ulduar.hodir._store import UnfinishedUpload
 
 Stage = Literal["confirmed", "cancelled", "open", "skipped"]
 PASSED = "passed"
@@ -57,6 +60,23 @@ class Verification:
     def failed(self) -> tuple[Finding, ...]:
         """The findings whose outcome is not `passed`."""
         return tuple(finding for finding in self.findings if finding.outcome != PASSED)
+
+
+@dataclass(frozen=True, slots=True)
+class Reconciliation:
+    """One reconciliation of a scope: the store's objects against the Archivum's live addresses, and what differed.
+
+    *objects_listed* is how many objects the store holds under the scope's object prefix; *skipped_young* how many
+    objects and unfinished uploads were not judged because they are younger than the grace period; *findings* are
+    the disagreements only (outcomes `object_without_entry`, `entry_without_object`, `unfinished_upload`).
+    """
+
+    check_id: UUID
+    scope: str
+    objects_listed: int
+    skipped_young: int
+    findings: tuple[Finding, ...]
+    event_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,3 +173,60 @@ class RetentionRun:
     due: tuple[DueAddress, ...]
     outcomes: tuple[DeletionOutcome, ...]
     open_intents: tuple[OpenIntent, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Orphan:
+    """An object (*scope*, *checksum*) of *size* bytes that no live registration names."""
+
+    scope: str
+    checksum: bytes
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class Adoption:
+    """A manifest without a registration whose object exists: the artifact the cleanup registers (or did)."""
+
+    artifact_id: UUID
+    scope: str
+    checksum: bytes
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupRun:
+    """One run of the built-in incomplete-put rule over one or every scope, with what it found and (real run) did.
+
+    The listing fields are filled by a dry run too: *adopt* are the manifests without a registration whose object
+    exists, past the grace period; *remove* the objects without an entry or a manifest, past the grace period;
+    *abort* the unfinished uploads past it; *open_intents* the incomplete-put deletions a failed run left open for
+    objects not in *remove*. A real run fills the rest: *adopted* are the artifacts registered (an artifact the
+    catalog already held is returned as it is, its origin kept), *outcomes* the deletions, open intents first;
+    *datasets_missing* counts the adopted artifacts whose dataset the Archivum does not hold, registered without one.
+    """
+
+    dry_run: bool
+    adopt: tuple[Adoption, ...]
+    remove: tuple[Orphan, ...]
+    abort: tuple[UnfinishedUpload, ...]
+    open_intents: tuple[Orphan, ...] = ()
+    outcomes: tuple[DeletionOutcome, ...] = ()
+    adopted: tuple[Artifact, ...] = ()
+    datasets_missing: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Rebuild:
+    """What a rebuild put back into the Archivum from the store.
+
+    *deletions_restored* are the deletion records the Archivum lacked; *adopted* the artifacts registered again
+    from manifests under their original ids; *datasets_missing* those registered without the dataset their
+    manifest names, which the Archivum does not hold; *removals* the redactions and history-retention actions the
+    store holds, in event order, for `freya.reapply_removals` (the recording role cannot apply them).
+    """
+
+    deletions_restored: int
+    adopted: tuple[Artifact, ...]
+    datasets_missing: int
+    removals: tuple[Redaction | RetentionAction, ...]

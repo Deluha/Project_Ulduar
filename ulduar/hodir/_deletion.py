@@ -27,7 +27,6 @@ from ulduar.hodir._store import DeletingStore
 
 logger = logging.getLogger(__name__)
 
-_SHORT_CHECKSUM_HEX = 12
 # What `_settle` returns: the outcome row (None when nothing was recorded), the stage reached and why.
 _Settled = tuple[DeletionRecord | None, Stage, str | None]
 
@@ -55,7 +54,7 @@ def delete_address(
     write the intent's record raises and deletes nothing; a failure to write an outcome's record after its commit is
     logged only.
     """
-    short = checksum.hex()[:_SHORT_CHECKSUM_HEX]
+    short = _layout.short_checksum(checksum)
 
     def begin(tx: Connection) -> DeletionRecord | None:
         _archivum.lock_address(tx, project.project_id, scope, checksum)
@@ -115,7 +114,7 @@ def _settle(
         logger.warning(
             "deletion %s of object %s in scope %s stays open: a version remains",
             intent.deletion_id,
-            checksum.hex()[:_SHORT_CHECKSUM_HEX],
+            _layout.short_checksum(checksum),
             scope,
         )
         return None, "open", "a version of the object remains"

@@ -15,10 +15,10 @@ edges between artifacts and datasets, with ancestors and descendants queries.
 |---|---|
 | `__init__.py` | The facade: re-exports the public surface listed under Interfaces & contracts |
 | `ledger.py` | `load_steps`, `install`, `check_schema`, `schema_status`, `library_release`, `open_ledger_connection`, the bootstrap, `LEDGER_LOCK_KEY` |
-| `_records.py` | Private, below the others: the records (`Project`, `NodeRef`, `Dataset`, `Artifact`, `LineageEdge`, `LineageNode`), `qualified` (the one home of the schema name), `Connection`, `insert_with_partition_retry` |
+| `_records.py` | Private, below the others: the records (`Project`, `NodeRef`, `Dataset`, `Artifact`, `LineageEdge`, `LineageNode`, `RetentionAction`), `qualified` (the one home of the schema name), `Connection`, `insert_with_partition_retry` |
 | `catalog.py` | `ARTIFACT_KINDS`, `open_catalog` and `Catalog` (with `transaction`, the hook the other components record through); the argument checks `check_kind` and `check_origin`, which Hodir reuses to validate a put before it stores anything |
 | `lineage.py` | The edge insert and the ancestor and descendant walks, as functions of `(conn, settings, project, …)` that `Catalog` calls with its own |
-| `history.py` | Ledger-role calls: `onboard_project`, `declare_history_retention`, `apply_history_retention`, `redact`; the only code that issues `UPDATE` or `DELETE` against history |
+| `history.py` | Ledger-role calls: `onboard_project`, `declare_history_retention`, `apply_history_retention`, `redact`, `reapply_removals`; the only code that issues `UPDATE` or `DELETE` against history |
 | `steps/0001_catalog.sql` | Step 1: roles, tables, functions, triggers, partitions, row-level security and grants |
 | `steps/0002_archive.sql` | Step 2 (additive): the archive's tables, the registration trigger, `artifact_is_archived`, the history list widened, the partition functions replaced |
 
@@ -53,7 +53,10 @@ edges between artifacts and datasets, with ancestors and descendants queries.
   `history_retention_rule`, `schema_ledger`, and `EXECUTE` on `member_projects`, `node_exists`,
   `is_ledger_role`, `ensure_partitions`; step 2 adds `SELECT` and `INSERT` on `archive_registration`,
   `archive_deletion`, `archive_check`, `archive_finding`, `SELECT` on `archive_retention_rule` and `EXECUTE` on
-  `artifact_is_archived`. No `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` or `TRIGGER`.
+  `artifact_is_archived`; step 2 also adds `SELECT` on `redaction` and `history_retention_action` (with their
+  `member_select` policies), so a recording session can copy those records to the archive store (D32, H4): they hold
+  ids, field names, reasons, counts and times, never a removed value. No `UPDATE`, `DELETE`, `TRUNCATE`,
+  `REFERENCES` or `TRIGGER`.
 - `ulduar_recorder` is cluster-wide (roles are shared by every database of a server). A second Archivum on
   the same server finds it already there, so its ledger role must hold `ADMIN OPTION` on it (granted once by a
   superuser) to onboard a project. Because the group holds the same grants in each Archivum, a recording role
@@ -214,7 +217,27 @@ ends with the transaction).
   `redacted:<redaction id>` (the original identity can then be registered anew as a new dataset). Any other
   pair, or a reason other than `personal_data`, `secret`, `recorded_by_mistake`, is a `ValueError`; a record that
   is not in the project is `UnknownRecordError`. Retention and redaction records are never removed or changed,
-  not even by the ledger role in maintenance mode (the triggers of step 1 refuse).
+  not even by the ledger role in maintenance mode (the triggers of step 1 refuse). With `redaction_id=` (a UUIDv7;
+  the keyword is not `record_id`, which is the redacted record's) the call is idempotent and is how a redaction is
+  made again under its original id: one already recorded under that id with the same history, record, field and
+  reason is returned as stored, with other content it is a `UlduarError`; otherwise the redaction is made under
+  that id and its `event_at` is the id's time.
+- `reapply_removals(config, removals) -> ReapplyResult(applied, already_present, missing_targets)` applies the
+  redactions and history-retention actions that Hodir's `rebuild` read from the archive store (a `Redaction`, or a
+  `RetentionAction(action_id, project, history, rule_id, keep_days, rule_event_at, cutoff, rows_removed,
+  event_at)`), one ledger transaction and connection per removal, in the order given. A redaction already
+  recorded under its id is `already_present`; one whose redacted record the Archivum lacks (a rebuilt Archivum
+  holds no dataset, and no origin) is `missing_targets` and records nothing; otherwise it is made as `redact` makes
+  it. An action already recorded under its id is `already_present`; otherwise, under the retention lock of its
+  (project, history), its rule is inserted when the Archivum lacks it (same id, history, `keep_days` and time),
+  the rows of its history older than its `cutoff` are deleted by the code `apply_history_retention` uses (an
+  artifact whose object is archived stays; registrations leave with their artifacts), and the action is recorded
+  with its original id, time and `rows_removed` (what it removed then, not now). A project the Archivum lacks is
+  `UnknownRecordError`, a history that is not retained a `ValueError`. A restored rule is a new row whose `recorded_at` is the database's now, so it would win as the
+  latest rule over one the Archivum already holds; when that rule's `event_at` is later than the restored rule's, a new
+  rule record (a new id) repeating its `keep_days` is appended in the same transaction, after the retention lock of
+  the pair, so the rule in force is unchanged (an `info` line says so). With no later rule the restored one is the
+  latest and nothing else is appended.
 
 ## Interfaces & contracts
 
@@ -239,12 +262,13 @@ ends with the transaction).
 - Records (frozen): `LineageEdge(edge_id, child, parent, run_id, event_at, recorded_at)`; `LineageNode(ref,
   depth)`; `Project(project_id, name)`; `NodeRef(kind, id)`; `Dataset(dataset_id, project_id, scope,
   namespace, name, event_at, recorded_at)` and `Artifact(artifact_id, project_id, scope, kind, checksum, size,
-  origin, dataset_id, event_at, recorded_at)`, each with a `ref -> NodeRef`.
+  origin, dataset_id, event_at, recorded_at)`, each with a `ref -> NodeRef`; `RetentionAction` as above.
 - Ledger role: `onboard_project(config, project, login_role, *, scopes=("default",)) -> Project`;
   `declare_history_retention(config, project, history, keep_days) -> RetentionRule(rule_id, project, history,
   keep_days, event_at)`; `apply_history_retention(config, *, dry_run=True, now=None) -> list[RetentionResult(
   project, history, rule_id, cutoff, rows, dry_run)]`; `redact(config, project, history, record_id, field,
-  reason) -> Redaction(redaction_id, project, history, record_id, field, reason, event_at)`.
+  reason, *, redaction_id=None) -> Redaction(redaction_id, project, history, record_id, field, reason,
+  event_at)`; `reapply_removals(config, removals) -> ReapplyResult(applied, already_present, missing_targets)`.
 - `Connection` (`psycopg.Connection[TupleRow]`) is exported for the callbacks of `Catalog.transaction`.
 - Constants: `ARTIFACT_KINDS` (a test holds it equal to the `artifact_kind` rows); in `history.py`: `HISTORIES` (a test holds it equal to the schema's CHECK list),
   `REDACTABLE_FIELDS`, `REDACTION_REASONS`, `MAINTENANCE_SETTING`.

@@ -37,12 +37,12 @@ from ulduar.hodir._records import (
     RetentionRun,
     Stage,
 )
-from ulduar.hodir._store import DeletingStore, open_store
+from ulduar.hodir._store import DeletingStore, WritingStore, open_store
+from ulduar.hodir._sync import sync_records
 from ulduar.hodir.archive import _ensure_format
 
 logger = logging.getLogger(__name__)
 
-_SHORT_CHECKSUM_HEX = 12
 _STAGES = get_args(Stage)
 
 
@@ -181,7 +181,7 @@ def _read_open_intents(tx: Connection, project: Project, scope: str | None, due:
     """The open retention intents in *scope* whose objects are not in *due*, one per object."""
     wanted = {(address.scope, address.checksum) for address in due}
     found: dict[tuple[str, bytes], OpenIntent] = {}
-    for intent in _archivum.open_retention_intents(tx, project, scope):
+    for intent in _archivum.open_intents(tx, project, scope, "retention"):
         key = (intent.scope, intent.checksum)
         if key not in wanted and key not in found:
             assert intent.rule_id is not None  # a retention intent names its rule (the table's CHECK)
@@ -197,7 +197,7 @@ def apply_retention(
     scope: str | None = None,
     now: datetime | None = None,
 ) -> RetentionRun:
-    """List (dry run, the default: the Archivum is read, no store is opened) or delete what retention makes due.
+    """List (dry run, the default) or delete what retention makes due; either way, copy missing records to the store.
 
     The objects due at *now* (default the current time; it must be timezone-aware) in *scope* (default: every
     scope of the project) are those whose every registration expired (`due_addresses`). A real run needs the
@@ -208,7 +208,8 @@ def apply_retention(
     listed in `open_intents` (a dry run lists them too) and do not count towards the limit. An object that is no
     longer due when its turn comes, because a put or a longer rule arrived meanwhile, is skipped, and one the store
     refuses to delete stays `open`: the run goes on and the next run resumes it. `ConfigurationError` without
-    `[archive]` (or, for a real run, without the deleter);
+    `[archive]` (or, for a real run, without the deleter); a dry run opens the writing store, to copy the records the
+    store lacks (`archive_deletion`, `redaction`, `history_retention_action`), and deletes nothing;
     `UnknownRecordError` for a *scope* the project lacks; `ValueError` for a bad *now* or *scope*.
     """
     settings = config.archive
@@ -219,9 +220,9 @@ def apply_retention(
         raise ValueError("now must be a timezone-aware datetime")
     if scope is not None:
         check_name(scope, "scope")
-    store = None if dry_run else open_store(settings, deleting=True)
-    if store is not None:
-        _ensure_format(store)
+    deleting = None if dry_run else open_store(settings, deleting=True)
+    store: WritingStore = deleting if deleting is not None else open_store(settings)
+    _ensure_format(store)
     with open_catalog(config) as catalog:
         project = catalog.project
 
@@ -233,8 +234,9 @@ def apply_retention(
 
         listed, resumable = catalog.transaction("Reading what archive retention makes due", read)
         due, open_intents = tuple(listed), tuple(resumable)
-        if store is None:
+        if deleting is None:
             logger.info("retention dry run: %d objects are due, %d open intents are not", len(due), len(open_intents))
+            sync_records(catalog, store)
             return RetentionRun(True, due, (), open_intents)
         if len(due) > settings.max_deletions_per_run and not allow_over_limit:
             raise UlduarError(
@@ -244,8 +246,9 @@ def apply_retention(
         outcomes = []
         targets: list[DueAddress | OpenIntent] = [*open_intents, *due]
         for target in targets:
-            outcomes.append(_delete_one(catalog, store, project, target, now))
+            outcomes.append(_delete_one(catalog, deleting, project, target, now))
             _log_outcome(outcomes[-1])
+        sync_records(catalog, store)
     result = RetentionRun(False, due, tuple(outcomes), open_intents)
     logger.info(
         "retention applied: %d due, %d open intents resumed, %s",
@@ -286,7 +289,7 @@ def _manifest_keys(tx: Connection, project: Project, scope: str, checksum: bytes
 def _log_outcome(outcome: DeletionOutcome) -> None:
     logger.info(
         "retention: object %s in scope %s is %s",
-        outcome.checksum.hex()[:_SHORT_CHECKSUM_HEX],
+        _layout.short_checksum(outcome.checksum),
         outcome.scope,
         outcome.stage,
     )
