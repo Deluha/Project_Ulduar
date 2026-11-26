@@ -39,7 +39,11 @@ SAME_SIZE_OTHER_BYTES = bytes(8)
 
 
 class WrappedStore:
-    """A store that forwards to a real one, counting reads, and reports every object cold or fails every read."""
+    """A store that forwards to a real one, counting reads, and reports every object cold or fails every read.
+
+    `cold=True` alters the real backend's `head` answer (`immediate=False`) to stand for a cold storage class,
+    which the local object store cannot produce.
+    """
 
     def __init__(self, store: WritingStore, *, cold: bool = False, unavailable: bool = False) -> None:
         self._store = store
@@ -230,7 +234,7 @@ def test_an_unavailable_store_propagates_and_nothing_is_recorded(
 # --- the rotation of a sample ---
 
 
-def test_a_sample_of_one_visits_every_object_once_then_the_one_passed_longest_ago(
+def test_a_sample_of_one_visits_every_object_once_then_the_one_checked_longest_ago(
     config: Config, archivum: Archivum, tmp_path: Path
 ) -> None:
     stored = stage(config, tmp_path, b"one", b"two", b"three")
@@ -244,15 +248,28 @@ def test_a_sample_of_one_visits_every_object_once_then_the_one_passed_longest_ag
     assert count(archivum, "SELECT count(*) FROM ulduar.archive_check") == 4
 
 
-def test_a_failed_object_has_no_pass_to_its_name_so_it_stays_at_the_front_of_every_sample(
+def test_a_failed_object_does_not_hold_the_rotation_its_last_check_of_any_outcome_counts(
     config: Config, tmp_path: Path, tamper: Callable[[str, bytes | None], None]
 ) -> None:
     stored = stage(config, tmp_path, b"one", b"two", b"three")
     tamper(key_of(stored[1]), SAME_SIZE_OTHER_BYTES)
     with open_archive(config) as session:
-        session.verify()  # the two intact objects now have a pass; the corrupted one has none
+        session.verify()  # every object has now been checked once, the corrupted one with a failure
         picked = [session.verify(sample=1).findings[0] for _ in range(3)]
-    assert [(f.checksum, f.outcome) for f in picked] == [(stored[1].checksum, "mismatch")] * 3
+    assert sorted(f.checksum for f in picked) == sorted(a.checksum for a in stored)  # each once, the failed one too
+    assert [f.outcome for f in picked if f.checksum == stored[1].checksum] == ["mismatch"]
+
+
+def test_a_reconciliation_finding_is_not_a_verification_and_does_not_move_the_rotation(
+    config: Config, tmp_path: Path, tamper: Callable[[str, bytes | None], None]
+) -> None:
+    first, second = sorted(stage(config, tmp_path, b"one", b"two"), key=lambda artifact: artifact.checksum)
+    with open_archive(config) as session:
+        session.verify()  # `first` is judged, so checked, before `second`
+        tamper(key_of(first), None)
+        assert [f.outcome for f in session.reconcile().findings] == ["entry_without_object"]
+        [picked] = session.verify(sample=1).findings
+    assert (picked.checksum, picked.outcome) == (first.checksum, "missing")
 
 
 def test_a_sample_larger_than_the_scope_judges_every_address(config: Config, tmp_path: Path) -> None:

@@ -17,7 +17,7 @@ import logging
 import os
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from tests.conftest import (
     Archivum,
     Fault,
     archive_config,
+    backdate_registration,
     count,
     faulty_archive,
     ms_ago,
@@ -42,6 +43,7 @@ from ulduar.errors import (
     ArchiveFormatError,
     ArchiveUnavailable,
     ConfigurationError,
+    UlduarError,
     UnknownRecordError,
 )
 from ulduar.freya import (
@@ -64,13 +66,14 @@ from ulduar.hodir import (
     Orphan,
     Rebuild,
     Reconciliation,
+    UnfinishedUpload,
     _layout,
     apply_retention,
     clean_incomplete,
     declare_retention,
     open_archive,
 )
-from ulduar.hodir import cleanup as cleanup_module
+from ulduar.hodir import _store as store_module
 from ulduar.hodir._store import open_store
 from ulduar.hodir._sync import sync_records
 
@@ -108,6 +111,15 @@ def put(
             retention_class=retention_class,
             record_id=_ids.uuid7(ms_ago(days)),
         )
+
+
+def put_aged(
+    archivum: Archivum, config: Config, tmp_path: Path, content: bytes, days: int, **keywords: Any
+) -> Artifact:
+    """`put` of an artifact whose registration is *days* old (back-dated: the age retention counts)."""
+    artifact = put(config, tmp_path, content, days=days, **keywords)
+    backdate_registration(archivum, artifact, days)
+    return artifact
 
 
 def interrupted(config: Config, tmp_path: Path, content: bytes, method: str, **keywords: Any) -> uuid.UUID:
@@ -477,6 +489,7 @@ def test_an_unfinished_upload_is_reported_once_it_is_older_than_the_grace_period
     [finding] = second.findings
     assert (finding.outcome, finding.checksum, finding.size) == ("unfinished_upload", None, None)
     assert finding_rows(archivum) == [("unfinished_upload", None, None)]
+    assert path_of(dir_config, young).exists()  # reconcile only reports: `clean_incomplete` aborts
 
 
 # --- the built-in incomplete-put rule ---
@@ -512,7 +525,13 @@ def test_a_dry_run_lists_what_the_rule_would_do_and_changes_nothing(
     assert {a.artifact_id for a in run.adopt} == {found["manifested"], found["recorded"]}
     assert all(isinstance(a, Adoption) for a in run.adopt)
     assert run.remove == (Orphan("default", _checksum(b"orphan"), 6),)
-    assert [u.key for u in run.abort] == [found["temporary"]]
+    [upload] = run.abort
+    assert isinstance(upload, UnfinishedUpload) and upload.key == found["temporary"]
+    assert [field.name for field in fields(UnfinishedUpload)] == [
+        "key",
+        "started",
+    ]  # the store's upload id stays private
+    assert upload.started < datetime.now(UTC) - timedelta(days=OLD_DAYS - 1)
     assert (run.open_intents, run.outcomes, run.adopted, run.datasets_missing) == ((), (), (), 0)
     assert keys(dir_config, "alpha") == before
     assert path_of(dir_config, found["temporary"]).exists()
@@ -603,7 +622,11 @@ def test_an_open_incomplete_put_intent_is_resumed_by_the_next_run(
             raise ArchiveUnavailable(f"Deleting {key} failed: injected")
 
     with monkeypatch.context() as patch:
-        patch.setattr(cleanup_module, "open_store", lambda settings, *, deleting=False: Refusing(open_store(settings)))
+        patch.setattr(
+            store_module,
+            "open_store",
+            lambda settings, *, deleting=False: Refusing(open_store(settings, deleting=True)),
+        )
         [outcome] = clean_incomplete(dir_config, dry_run=False).outcomes
     assert outcome.stage == "open"
     assert [row[1] for row in deletion_rows(archivum)] == ["intent"]
@@ -629,7 +652,11 @@ def test_an_open_intent_whose_object_was_registered_since_is_listed_and_cancelle
             raise ArchiveUnavailable(f"Deleting {key} failed: injected")
 
     with monkeypatch.context() as patch:
-        patch.setattr(cleanup_module, "open_store", lambda settings, *, deleting=False: Refusing(open_store(settings)))
+        patch.setattr(
+            store_module,
+            "open_store",
+            lambda settings, *, deleting=False: Refusing(open_store(settings, deleting=True)),
+        )
         clean_incomplete(dir_config, dry_run=False)
     put(dir_config, tmp_path, b"stuck")  # the content is registered after the intent
     dry = clean_incomplete(dir_config)
@@ -658,6 +685,48 @@ def test_the_rule_refuses_a_missing_archive_section_and_a_bad_or_unknown_scope(c
         clean_incomplete(config, scope="elsewhere")
 
 
+def test_a_retry_with_an_origin_of_a_put_adopted_from_its_manifest_returns_the_adopted_artifact(
+    dir_config: Config, archivum: Archivum, tmp_path: Path
+) -> None:
+    record_id = interrupted(dir_config, tmp_path, b"half", "put_bytes_new", origin="src/half.csv")
+    backdate(dir_config, key_of(b"half"))
+    backdate(dir_config, manifest_key_of(record_id))
+    [adopted] = clean_incomplete(dir_config, dry_run=False).adopted  # a manifest holds no origin
+    assert (adopted.artifact_id, adopted.origin) == (record_id, None)
+    retry = tmp_path / "retry.bin"
+    retry.write_bytes(b"half")
+    with open_archive(dir_config) as session:
+        assert session.put_file(retry, "report", origin="src/half.csv", record_id=record_id) == adopted
+        with pytest.raises(UlduarError, match="already has a different manifest"):
+            session.put_file(retry, "raw_file", origin="src/half.csv", record_id=record_id)
+    assert [row[0] for row in registered(archivum)] == [record_id]
+
+
+def test_the_record_sweep_runs_even_when_a_step_of_a_real_run_raises(
+    dir_config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stray_temporary(dir_config, days=OLD_DAYS)  # an unfinished upload to abort, which the store refuses
+    [redaction] = make_redactions(dir_config, tmp_path)  # a record the Archivum holds and the store lacks
+    assert stored_records(dir_config) == []
+
+    class Refusing:
+        def __init__(self, store: Any) -> None:
+            self._store = store
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._store, name)
+
+        def abort_unfinished(self, upload: Any) -> None:
+            raise ArchiveUnavailable("Aborting the upload failed: injected")
+
+    monkeypatch.setattr(
+        store_module, "open_store", lambda settings, *, deleting=False: Refusing(open_store(settings, deleting=True))
+    )
+    with pytest.raises(ArchiveUnavailable, match="injected"):
+        clean_incomplete(dir_config, dry_run=False)
+    assert [record.identifier for record in stored_records(dir_config)] == [redaction.redaction_id]
+
+
 # --- the record sweep ---
 
 
@@ -678,7 +747,7 @@ def make_redactions(config: Config, tmp_path: Path, n: int = 1) -> list[Redactio
 def test_every_record_is_in_the_store_exactly_once_after_verify_retention_and_redaction(
     config: Config, archivum: Archivum, tmp_path: Path
 ) -> None:
-    put(config, tmp_path, b"old", days=100, retention_class="short")
+    put_aged(archivum, config, tmp_path, b"old", 100, retention_class="short")
     declare_retention(config, "alpha", "short", 30, confirm_shortening=True)
     apply_retention(config, dry_run=False)  # an intent and a confirmation, both written by the protocol itself
     [redaction] = make_redactions(config, tmp_path)
@@ -788,14 +857,14 @@ def rebuilt_config(second: Archivum, tmp_path: Path, config: Config) -> Config:
     return replace(onboarded(second, directory), archive=config.archive)
 
 
-def populate(config: Config, tmp_path: Path) -> dict[str, Any]:
+def populate(archivum: Archivum, config: Config, tmp_path: Path) -> dict[str, Any]:
     """Archive a dataset's objects, delete one by retention, archive its content again, redact and age history out."""
     with open_catalog(config) as catalog:
         dataset = catalog.register_dataset("ns", "events")
     made: dict[str, Any] = {"dataset": dataset}
     made["a"] = put(config, tmp_path, b"a", dataset=dataset, retention_class="short", origin="src/a.csv")
     made["b"] = put(config, tmp_path, b"b", dataset=dataset, retention_class="short")
-    made["c_old"] = put(config, tmp_path, b"c", days=100, retention_class="short")
+    made["c_old"] = put_aged(archivum, config, tmp_path, b"c", 100, retention_class="short")
     declare_retention(config, "alpha", "short", 30, confirm_shortening=True)
     [outcome] = apply_retention(config, dry_run=False).outcomes
     assert outcome.stage == "confirmed"
@@ -814,7 +883,7 @@ def populate(config: Config, tmp_path: Path) -> dict[str, Any]:
 def test_rebuild_restores_deletions_first_then_registrations_and_lists_the_removals(
     config: Config, archivum: Archivum, second_archivum: Archivum, tmp_path: Path
 ) -> None:
-    made = populate(config, tmp_path)
+    made = populate(archivum, config, tmp_path)
     second = rebuilt_config(second_archivum, tmp_path, config)
     with open_archive(second) as session:
         assert session.rebuild(since=datetime.now(UTC) + timedelta(days=62)) == Rebuild(0, (), 0, ())
@@ -896,7 +965,7 @@ def test_rebuild_refuses_a_deletion_of_a_scope_the_new_archivum_lacks(
     config: Config, archivum: Archivum, second_archivum: Archivum, tmp_path: Path
 ) -> None:
     onboard_project(config, "alpha", recorder_of(archivum, config).role, scopes=("default", "staging"))
-    put(config, tmp_path, b"staged", days=100, retention_class="short", scope="staging")
+    put_aged(archivum, config, tmp_path, b"staged", 100, retention_class="short", scope="staging")
     declare_retention(config, "alpha", "short", 30, confirm_shortening=True)
     apply_retention(config, dry_run=False)
     second = rebuilt_config(second_archivum, tmp_path, config)

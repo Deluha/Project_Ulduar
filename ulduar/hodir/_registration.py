@@ -2,7 +2,8 @@
 
 Input: a catalog session and a writing store. Output: `register_object` (the registration under the address lock,
 the one step a put, an adoption and a rebuild all end with), `unregistered_manifests` (the manifests of a scope
-that no registration names, read and checked) and `adopt_manifest` (the artifact and registration of one of them).
+that no registration names, read and checked), `adopt_manifest` (the artifact and registration of one of them) and
+`adopt_all` (the loop a cleanup and a rebuild share: adopt each, count those left without their dataset).
 Private: Hodir's modules import it, a consumer never does. A manifest carries no origin, so an adopted artifact
 has none; an artifact the catalog already holds keeps the origin it has.
 """
@@ -10,6 +11,7 @@ has none; an artifact the catalog already holds keeps the origin it has.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from typing import NamedTuple
 
@@ -123,3 +125,22 @@ def adopt_manifest(catalog: Catalog, store: WritingStore, manifest: _layout.Mani
         return None
     logger.info("adopted artifact %s from its manifest", artifact.artifact_id)
     return artifact
+
+
+def adopt_all(
+    catalog: Catalog, store: WritingStore, manifests: Iterable[_layout.Manifest]
+) -> tuple[list[Artifact], int]:
+    """Adopt each manifest: the artifacts registered, and how many of them lost the dataset their manifest names.
+
+    A manifest whose object is gone is logged and left out.
+    """
+    adopted: list[Artifact] = []
+    datasets_missing = 0
+    for manifest in manifests:
+        artifact = adopt_manifest(catalog, store, manifest)
+        if artifact is None:
+            logger.warning("manifest %s was not adopted: its object is gone", manifest.artifact_id)
+            continue
+        adopted.append(artifact)
+        datasets_missing += manifest.dataset_id is not None and artifact.dataset_id is None
+    return adopted, datasets_missing

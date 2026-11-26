@@ -6,24 +6,26 @@ appends and the `RetentionRun` of an application. Sits above Freya's two hooks (
 `Catalog.transaction`) and the deletion protocol (`_deletion`); the facade `ulduar.hodir` re-exports it.
 
 A put names a retention class, fixed at archive time (a registration without one is kept for ever); the latest rule
-of a class says how many days its registrations are kept and how many of a dataset's newest are never deleted by
-age alone. An object is due only when every registration of it has expired under its own class (H13): the longest
-retention wins, and a class without a rule keeps for ever. Applying retention is a dry run unless asked, refuses to
-go past `archive.max_deletions_per_run` without being told, and deletes through the one protocol every deletion shares.
+of a class says how many days its registrations are kept, counted from the registration's `recorded_at` against the
+database's clock (a rebuild registers again, which restarts the age: it errs towards keeping), and how many of a
+dataset's newest are never deleted by age alone. An object is due only when every registration of it has expired
+under its own class (H13): the longest retention wins, and a class without a rule keeps for ever. Applying retention
+is a dry run unless asked, refuses to go past `archive.max_deletions_per_run` without being told, and deletes
+through the one protocol every deletion shares.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import get_args
 from uuid import UUID
 
 from ulduar import _ids
 from ulduar._schema import lookup_project_id
 from ulduar.config import Config, check_name
-from ulduar.errors import ConfigurationError, UlduarError
+from ulduar.errors import UlduarError
 from ulduar.freya import Catalog, Connection, Project, ledger_transaction, open_catalog
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._deletion import delete_address, manifest_keys
@@ -37,9 +39,8 @@ from ulduar.hodir._records import (
     RetentionRun,
     Stage,
 )
-from ulduar.hodir._store import DeletingStore, WritingStore, open_store
+from ulduar.hodir._store import DeletingStore, open_maintenance_store
 from ulduar.hodir._sync import sync_records
-from ulduar.hodir.archive import _ensure_format
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +57,15 @@ def _check_int(argument: str, value: int | None, minimum: int, *, allow_none: bo
 
 
 def _shortens(current: LatestRule | None, keep_days: int | None, keep_newest: int) -> bool:
-    """True when a rule of *keep_days* and *keep_newest* keeps objects for less time than *current* (None: no rule)."""
-    if current is None:
-        return keep_days is not None
-    if keep_newest < current.keep_newest:
-        return True
+    """True when a rule of *keep_days* and *keep_newest* keeps objects for less time than *current* (None: no rule).
+
+    A rule with no `keep_days` keeps for ever, so it is never a shortening, whatever its *keep_newest*.
+    """
     if keep_days is None:
-        return False
-    return current.keep_days is None or keep_days < current.keep_days
+        return False  # keeps for ever: keep_newest protects nothing a rule that deletes nothing would delete
+    if current is None or current.keep_days is None or keep_newest < current.keep_newest:
+        return True
+    return keep_days < current.keep_days
 
 
 def declare_retention(
@@ -114,14 +116,17 @@ def declare_retention(
 
 
 def _dataset_ranks(registrations: list[LiveRegistration]) -> dict[UUID, int]:
-    """Each registration's rank among the live registrations of its dataset, newest first (0 is the newest)."""
+    """Each registration's rank among the live registrations of its dataset, newest first (0 is the newest).
+
+    Newest is by `recorded_at` (the database's clock), then by artifact id.
+    """
     by_dataset: dict[UUID, list[LiveRegistration]] = {}
     for registration in registrations:
         if registration.dataset_id is not None:
             by_dataset.setdefault(registration.dataset_id, []).append(registration)
     ranks: dict[UUID, int] = {}
     for members in by_dataset.values():
-        members.sort(key=lambda r: (r.artifact_event_at, r.artifact_id), reverse=True)
+        members.sort(key=lambda r: (r.recorded_at, r.artifact_id), reverse=True)
         ranks.update({member.artifact_id: rank for rank, member in enumerate(members)})
     return ranks
 
@@ -135,7 +140,7 @@ def _expiry(
         return None
     if registration.dataset_id is not None and ranks[registration.artifact_id] < rule.keep_newest:
         return None
-    expires = registration.artifact_event_at + timedelta(days=rule.keep_days)
+    expires = registration.recorded_at + timedelta(days=rule.keep_days)
     return (expires, rule.rule_id) if expires < now else None
 
 
@@ -144,10 +149,10 @@ def due_addresses(
 ) -> list[DueAddress]:
     """The objects every live registration of which has expired at *now*, by scope and checksum.
 
-    A registration expires when its class has a rule with `keep_days` and its artifact is older than that, unless
-    it is among the `keep_newest` newest live registrations of its dataset (of any class; one without a dataset is
-    not protected). An object is due only when all its registrations expired, so the longest retention wins; its
-    `rule_id` is that of the registration that expired last.
+    A registration expires when its class has a rule with `keep_days` and it was recorded longer ago than that,
+    unless it is among the `keep_newest` newest live registrations of its dataset (of any class; one without a
+    dataset is not protected). An object is due only when all its registrations expired, so the longest retention
+    wins; its `rule_id` is that of the registration whose expiry (`recorded_at` plus `keep_days`) is the latest.
     """
     live = list(registrations)
     ranks = _dataset_ranks(live)
@@ -166,27 +171,31 @@ def due_addresses(
     return due
 
 
-def _read_due(tx: Connection, project_id: UUID, scope: str | None, now: datetime) -> list[DueAddress]:
-    """What is due now in *scope* (None: every scope), from the registrations and rules as the transaction sees them."""
+def _read_due(tx: Connection, project_id: UUID, scope: str | None) -> list[DueAddress]:
+    """What is due in *scope* (None: every scope) at the database's clock, as the transaction sees the registrations.
+
+    The clock is read in the same transaction as the registrations, so an age is never measured against another
+    machine's time.
+    """
     return due_addresses(
-        _archivum.live_registrations(tx, project_id, scope), _archivum.latest_rules(tx, project_id), now
+        _archivum.live_registrations(tx, project_id, scope),
+        _archivum.latest_rules(tx, project_id),
+        _archivum.database_now(tx),
     )
 
 
-def _is_due(tx: Connection, project_id: UUID, scope: str, checksum: bytes, now: datetime) -> bool:
-    return any((due.scope, due.checksum) == (scope, checksum) for due in _read_due(tx, project_id, scope, now))
+def _is_due(tx: Connection, project_id: UUID, scope: str, checksum: bytes) -> bool:
+    return any((due.scope, due.checksum) == (scope, checksum) for due in _read_due(tx, project_id, scope))
 
 
 def _read_open_intents(tx: Connection, project: Project, scope: str | None, due: list[DueAddress]) -> list[OpenIntent]:
     """The open retention intents in *scope* whose objects are not in *due*, one per object."""
     wanted = {(address.scope, address.checksum) for address in due}
-    found: dict[tuple[str, bytes], OpenIntent] = {}
-    for intent in _archivum.open_intents(tx, project, scope, "retention"):
-        key = (intent.scope, intent.checksum)
-        if key not in wanted and key not in found:
-            assert intent.rule_id is not None  # a retention intent names its rule (the table's CHECK)
-            found[key] = OpenIntent(intent.deletion_id, intent.scope, intent.checksum, intent.size, intent.rule_id)
-    return list(found.values())
+    found = []
+    for intent in _archivum.open_intents_outside(tx, project, scope, "retention", wanted):
+        assert intent.rule_id is not None  # a retention intent names its rule (the table's CHECK)
+        found.append(OpenIntent(intent.deletion_id, intent.scope, intent.checksum, intent.size, intent.rule_id))
+    return found
 
 
 def apply_retention(
@@ -195,41 +204,34 @@ def apply_retention(
     dry_run: bool = True,
     allow_over_limit: bool = False,
     scope: str | None = None,
-    now: datetime | None = None,
 ) -> RetentionRun:
     """List (dry run, the default) or delete what retention makes due; either way, copy missing records to the store.
 
-    The objects due at *now* (default the current time; it must be timezone-aware) in *scope* (default: every
-    scope of the project) are those whose every registration expired (`due_addresses`). A real run needs the
-    deleter credential and refuses, before deleting anything, to delete more objects than
-    `archive.max_deletions_per_run` unless *allow_over_limit*. Each object goes through the deletion protocol with
-    cause `retention`. A real run also passes every open retention intent of those scopes whose object is not due
-    (a failed run left it open and a rule was lengthened since) through the protocol, which cancels it; they are
-    listed in `open_intents` (a dry run lists them too) and do not count towards the limit. An object that is no
-    longer due when its turn comes, because a put or a longer rule arrived meanwhile, is skipped, and one the store
-    refuses to delete stays `open`: the run goes on and the next run resumes it. `ConfigurationError` without
-    `[archive]` (or, for a real run, without the deleter); a dry run opens the writing store, to copy the records the
-    store lacks (`archive_deletion`, `redaction`, `history_retention_action`), and deletes nothing;
-    `UnknownRecordError` for a *scope* the project lacks; `ValueError` for a bad *now* or *scope*.
+    The objects due now in *scope* (default: every scope of the project) are those whose every registration
+    expired (`due_addresses`), an age counted from the registration's `recorded_at` against the database's clock,
+    read in the transaction that reads the registrations. A real run needs the deleter credential and refuses,
+    before deleting anything, to delete more objects than `archive.max_deletions_per_run` unless
+    *allow_over_limit*. Each object goes through the deletion protocol with cause `retention`. A real run also
+    passes every open retention intent of those scopes whose object is not due (a failed run left it open and a
+    rule was lengthened since) through the protocol, which cancels it; they are listed in `open_intents` (a dry run
+    lists them too) and do not count towards the limit. An object that is no longer due when its turn comes,
+    because a put or a longer rule arrived meanwhile, is skipped; so is one with an open intent of another cause
+    (the outcome's `detail` says so; nothing is recorded); one the store refuses to delete stays `open`: the run
+    goes on and the next run resumes it. `ConfigurationError` without `[archive]` (or, for a real run, without the
+    deleter); a dry run opens the writing store, to copy the records the store lacks (`archive_deletion`,
+    `redaction`, `history_retention_action`), and deletes nothing; `UnknownRecordError` for a *scope* the project
+    lacks; `ValueError` for a bad *scope*.
     """
-    settings = config.archive
-    if settings is None:
-        raise ConfigurationError("Configuration key `archive` is required to use the archive")
-    now = datetime.now(UTC) if now is None else now
-    if now.tzinfo is None:
-        raise ValueError("now must be a timezone-aware datetime")
     if scope is not None:
         check_name(scope, "scope")
-    deleting = None if dry_run else open_store(settings, deleting=True)
-    store: WritingStore = deleting if deleting is not None else open_store(settings)
-    _ensure_format(store)
+    settings, store, deleting = open_maintenance_store(config, deleting=not dry_run)
     with open_catalog(config) as catalog:
         project = catalog.project
 
         def read(tx: Connection) -> tuple[list[DueAddress], list[OpenIntent]]:
             if scope is not None:
                 _archivum.check_scope(tx, project, scope)
-            found = _read_due(tx, project.project_id, scope, now)
+            found = _read_due(tx, project.project_id, scope)
             return found, _read_open_intents(tx, project, scope, found)
 
         listed, resumable = catalog.transaction("Reading what archive retention makes due", read)
@@ -246,7 +248,7 @@ def apply_retention(
         outcomes = []
         targets: list[DueAddress | OpenIntent] = [*open_intents, *due]
         for target in targets:
-            outcomes.append(_delete_one(catalog, deleting, project, target, now))
+            outcomes.append(_delete_one(catalog, deleting, project, target))
             _log_outcome(outcomes[-1])
         sync_records(catalog, store)
     result = RetentionRun(False, due, tuple(outcomes), open_intents)
@@ -260,7 +262,7 @@ def apply_retention(
 
 
 def _delete_one(
-    catalog: Catalog, store: DeletingStore, project: Project, target: DueAddress | OpenIntent, now: datetime
+    catalog: Catalog, store: DeletingStore, project: Project, target: DueAddress | OpenIntent
 ) -> DeletionOutcome:
     """Delete one due object, or settle one open intent; transaction 2 re-checks that the object is due."""
     scope, checksum = target.scope, target.checksum
@@ -273,7 +275,7 @@ def _delete_one(
         target.size,
         cause="retention",
         rule_id=target.rule_id,
-        still_due=lambda tx: _is_due(tx, project.project_id, scope, checksum, now),
+        still_due=lambda tx: _is_due(tx, project.project_id, scope, checksum),
         manifests=lambda tx: manifest_keys(tx, project, scope, checksum),
     )
 

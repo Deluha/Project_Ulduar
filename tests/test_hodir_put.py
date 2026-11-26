@@ -16,6 +16,7 @@ import os
 import stat
 import threading
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -484,6 +485,18 @@ def test_a_stream_left_without_commit_or_with_an_exception_stores_nothing_and_le
     assert count(archivum, "SELECT count(*) FROM ulduar.artifact") == 0
 
 
+def test_a_second_commit_after_one_whose_store_step_failed_says_the_put_did_not_complete(
+    config: Config, archivum: Archivum
+) -> None:
+    with faulty_archive(config, method="put_bytes_new") as (session, _), session.put_stream("model") as sink:
+        sink.write(CONTENT)
+        with pytest.raises(Fault):
+            sink.commit()
+        with pytest.raises(UlduarError, match="^The put did not complete"):
+            sink.commit()
+    assert registrations(archivum) == []
+
+
 def test_a_stream_past_the_spool_limit_is_refused_and_stores_nothing(
     config: Config, archivum: Archivum, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,10 +576,21 @@ def test_an_object_that_vanished_before_its_registration_is_stored_again_once(
 def test_an_object_that_vanishes_twice_is_an_integrity_error_and_nothing_is_registered(
     config: Config, archivum: Archivum, source: Path
 ) -> None:
-    with faulty_archive(config, hide_head=2) as (session, _):
+    with faulty_archive(config, hide_head=3) as (session, _):
         with pytest.raises(IntegrityError, match=f"^Object {object_key()} disappeared while it was being registered$"):
             session.put_file(source, "raw_file")
     assert registrations(archivum) == []
+
+
+def test_an_object_at_its_key_of_another_size_is_an_integrity_error_and_nothing_is_registered(
+    config: Config, archivum: Archivum, source: Path, tamper: Callable[[str, bytes | None], None]
+) -> None:
+    with open_archive(config) as session:
+        session.put_file(source, "raw_file")
+        tamper(object_key(), b"short")
+        with pytest.raises(IntegrityError, match=f"^Object {object_key()} holds other bytes than its address$"):
+            session.put_file(source, "raw_file")
+    assert len(registrations(archivum)) == 1  # the first put's
 
 
 # --- concurrency, isolation, secrets ---

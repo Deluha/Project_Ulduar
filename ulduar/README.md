@@ -48,7 +48,8 @@ file or a stream.
     matching `NAME_PATTERN`; default `ulduar`); `spool_dir` (an absolute path; default the system temporary
     directory); `spool_limit_gib` (100; 1–100000); `incomplete_put_grace_hours` (168; 24–8760);
     `max_deletions_per_run` (100; 1–1000000). `incomplete_put_grace_hours` is the grace period of `Archive.reconcile` and
-    `clean_incomplete`; `max_deletions_per_run` limits `apply_retention`.
+    `clean_incomplete`; `max_deletions_per_run` limits `apply_retention`. Both measure age on the database's clock (a
+    retention age counts from the object's registration, H31).
   - `directory` only: `path` (required, absolute; it must exist when the store opens). The s3-only keys
     below are refused.
   - `s3` only: `bucket` (required; S3 bucket naming, `^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`); `region`

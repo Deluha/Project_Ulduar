@@ -32,12 +32,12 @@ from uuid import UUID, uuid4
 from ulduar import _ids
 from ulduar._schema import check_kind, check_origin
 from ulduar.config import ArchiveSettings, Config, check_name
-from ulduar.errors import ConfigurationError, IntegrityError, UlduarError, UnknownRecordError
+from ulduar.errors import IntegrityError, UlduarError, UnknownRecordError
 from ulduar.freya import Artifact, Catalog, Connection, Dataset, Project, open_catalog
 from ulduar.hodir import _archivum, _layout, _rebuild, _reconcile
 from ulduar.hodir._records import PASSED, Finding, Rebuild, Reconciliation, Verification
 from ulduar.hodir._registration import register_object
-from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_regular, open_store, read_small
+from ulduar.hodir._store import CHUNK_SIZE, WritingStore, open_maintenance_store, open_regular, read_small
 from ulduar.hodir._sync import sync_records
 
 logger = logging.getLogger(__name__)
@@ -58,14 +58,6 @@ def _hash_object(store: WritingStore, key: str, write: Callable[[bytes], object]
     return digest.digest(), size
 
 
-def _ensure_format(store: WritingStore) -> None:
-    """Write the format marker and the layout text on first use, then check the marker the store holds."""
-    if store.head(_layout.FORMAT_MARKER_KEY) is None:
-        store.put_bytes_new(_layout.FORMAT_MARKER_KEY, _layout.marker_bytes())
-        store.put_bytes_new(_layout.LAYOUT_KEY, _layout.LAYOUT_TEXT.encode("utf-8"))
-    _layout.check_marker(read_small(store, _layout.FORMAT_MARKER_KEY))
-
-
 @contextmanager
 def open_archive(config: Config) -> Iterator[Archive]:
     """Open the archive of `[archive]` for writing, with a catalog session on the recording role.
@@ -74,12 +66,9 @@ def open_archive(config: Config) -> Iterator[Archive]:
     foreign or of another version (a new store gets its marker and layout text); the catalog session's errors
     as `freya.open_catalog` raises them. The catalog connection closes on exit.
     """
-    if config.archive is None:
-        raise ConfigurationError("Configuration key `archive` is required to use the archive")
+    settings, store, _ = open_maintenance_store(config)
     with open_catalog(config) as catalog:
-        store = open_store(config.archive)
-        _ensure_format(store)
-        yield Archive(catalog, store, config.archive)
+        yield Archive(catalog, store, settings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +81,7 @@ class _Request:
     scope: str
     retention_class: str | None
     artifact_id: UUID
+    explicit_id: bool  # the caller named the id: the put may be a retry of one that was interrupted
 
 
 class PutSink:
@@ -111,6 +101,7 @@ class PutSink:
         self._hash = hashlib.sha256()
         self._size = 0
         self._open = True
+        self._failed = False
         self._artifact: Artifact | None = None
 
     def write(self, data: bytes) -> None:
@@ -128,10 +119,14 @@ class PutSink:
         """Store what was written and register it; called again, it returns the same artifact."""
         if self._artifact is not None:
             return self._artifact
+        if self._failed:
+            raise UlduarError("The put did not complete — put the stream again, with the same record_id to finish it")
         if not self._open:
             raise UlduarError("The stream is closed — nothing was stored")
         self._close()
+        self._failed = True
         self._artifact = self._store(self._path, self._size, self._hash.digest())
+        self._failed = False
         return self._artifact
 
     def _close(self) -> None:
@@ -184,7 +179,7 @@ class Archive:
         _ids.uuid7_time(artifact_id)  # ValueError naming the id when it is not a version 7 UUID
         project = self.project
         self._catalog.transaction(f"Checking scope {scope}", lambda tx: _archivum.check_scope(tx, project, scope))
-        return _Request(kind, dataset, origin, scope, retention_class, artifact_id)
+        return _Request(kind, dataset, origin, scope, retention_class, artifact_id, record_id is not None)
 
     def put_file(
         self,
@@ -256,8 +251,9 @@ class Archive:
 
         Only the artifact's id is used: the checksum, size and scope are re-read from the catalog.
 
-        The bytes are written to a partial file beside the destination (`.<name>.ulduar-partial-<hex>`, mode 0o666
-        under the umask), hashed while written, and the destination appears, by a hard link, only after they match
+        The bytes are written to a partial file beside the destination (`.ulduar-partial-<hex>`, mode 0o666
+        under the umask; no part of the destination's name is in it, so a long name never overflows the file system's
+        limit), hashed while written, and the destination appears, by a hard link, only after they match
         the artifact's checksum and size and were synced; a failure at any point removes the partial file. A
         destination that exists (a dangling symbolic link included) is `FileExistsError`, and one whose parent is
         not a directory `FileNotFoundError` or `NotADirectoryError`, both before any read of the store.
@@ -274,7 +270,7 @@ class Archive:
             raise FileExistsError(errno.EEXIST, "The destination already exists", str(dest))
         directory = os.open(dest.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            partial = f".{dest.name}.ulduar-partial-{uuid4().hex}"
+            partial = f".ulduar-partial-{uuid4().hex}"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
             file = os.fdopen(os.open(partial, flags, 0o666, dir_fd=directory), "wb")
             try:
@@ -336,8 +332,9 @@ class Archive:
         `missing` (absent, or gone between the listing and the read), `not_immediate` (a storage class that
         cannot be read now; not read), `unreadable` (a link or special file where the object belongs, or a read
         the store refused as an `IntegrityError`), `mismatch` (the SHA-256 or the size differs) or `passed`.
-        With *sample* N (an integer of at least 1) only the N addresses whose latest passed finding is oldest are
-        judged, those never passed first, so repeated samples rotate through every object; otherwise all are.
+        With *sample* N (an integer of at least 1) only the N addresses whose latest verification finding, of any
+        outcome, is oldest are judged, those never verified first, so repeated samples rotate through every object
+        (a failing one included); otherwise all are.
         One check and one finding per judged address are recorded in one catalog transaction at the end; an
         `ArchiveUnavailable` propagates and records nothing. A scope of the project nothing was archived in records a
         check of 0 objects.
@@ -385,8 +382,11 @@ class Archive:
         (an unparseable key under `_objects` too, with no checksum). `entry_without_object`: a live address the store
         does not hold. `unfinished_upload`: an interrupted put's leftovers, older than the grace. Younger objects and
         uploads are skipped and counted. The grace period is measured by the database's clock against the store's
-        modification time. One check of kind `reconciliation` and a finding per disagreement are recorded in one
-        transaction; records the Archivum holds that the store lacks are copied to it afterwards.
+        modification time. It only reports: unfinished uploads are listed, never aborted (`clean_incomplete` does
+        that). An address the listing did not show is reported only if, asked again under its address lock after the
+        listing, it is still live and the store still lacks its object, so a deletion in progress is not a finding.
+        One check of kind `reconciliation` and a finding per disagreement are recorded in one transaction; records
+        the Archivum holds that the store lacks are copied to it afterwards.
         `ValueError` for a bad *scope*; `UnknownRecordError` for a scope the project lacks, before any listing.
         """
         scope = self.scope if scope is None else check_name(scope, "scope")
@@ -404,7 +404,8 @@ class Archive:
         matters: whether an object is archived compares the database's `recorded_at` of its registration with a
         confirmed deletion's, so a deletion restored after a registration would delete it again. The redactions and
         history-retention actions found are returned in `removals`, not applied (the recording role cannot; pass
-        them to `freya.reapply_removals`). *since* (timezone-aware) reads only the months from its month on.
+        them to `freya.reapply_removals`). *since* (timezone-aware) limits what is decoded to the months from its
+        month on; the whole `_records` and `_manifests` prefixes are still listed.
         Running it again changes nothing. The scopes of the project are the Archivum's: onboard them first
         (`UnknownRecordError` for a deletion record of another). `ValueError` for a naive *since*; `ArchiveFormatError`
         for a record or manifest that cannot be read.
@@ -449,19 +450,14 @@ class Archive:
         key = _layout.object_key(project.name, request.scope, sha256)
         stored_new = self._store.put_new(key, path, size, sha256)
         self._write_manifest(request, sha256, size)
-        artifact = self._catalog.register_artifact(
-            request.kind,
-            sha256,
-            size,
-            origin=request.origin,
-            dataset=request.dataset,
-            scope=request.scope,
-            record_id=request.artifact_id,
-        )
+        artifact = self._register_artifact(request, sha256, size)
         if not register_object(self._catalog, self._store, artifact, key, size, request.retention_class):
             # The object was deleted between the put and the registration: store it again, once.
             stored_new = self._store.put_new(key, path, size, sha256)
             if not register_object(self._catalog, self._store, artifact, key, size, request.retention_class):
+                found = self._store.head(key)
+                if found is not None:  # there, but not the bytes its address names
+                    raise IntegrityError(f"Object {key} holds other bytes than its address")
                 raise IntegrityError(f"Object {key} disappeared while it was being registered")
         logger.info(
             "archived %s (%d bytes) in scope %s, %s",
@@ -471,6 +467,29 @@ class Archive:
             "object stored" if stored_new else "object already stored",
         )
         return artifact
+
+    def _register_artifact(self, request: _Request, sha256: bytes, size: int) -> Artifact:
+        """The artifact the put records: new, or the one the retried `record_id` names.
+
+        A manifest carries no origin, so an artifact adopted from one has none: a retry that names an origin
+        accepts it when everything else the catalog holds matches. Anything else that differs is Freya's refusal.
+        """
+        if request.explicit_id and request.origin is not None:
+            dataset_id = None if request.dataset is None else request.dataset.dataset_id
+            with suppress(UnknownRecordError):
+                held = self._catalog.get_artifact(request.artifact_id)
+                content = (held.kind, held.checksum, held.size, held.scope, held.dataset_id)
+                if held.origin is None and content == (request.kind, sha256, size, request.scope, dataset_id):
+                    return held
+        return self._catalog.register_artifact(
+            request.kind,
+            sha256,
+            size,
+            origin=request.origin,
+            dataset=request.dataset,
+            scope=request.scope,
+            record_id=request.artifact_id,
+        )
 
     def _write_manifest(self, request: _Request, sha256: bytes, size: int) -> None:
         """Write the artifact's manifest once; one already stored under its id must be the same."""

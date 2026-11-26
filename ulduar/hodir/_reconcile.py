@@ -21,7 +21,7 @@ from ulduar import _ids
 from ulduar.freya import Catalog, Connection
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._records import Finding, Reconciliation
-from ulduar.hodir._store import StoredObject, UnfinishedUpload, WritingStore
+from ulduar.hodir._store import PendingUpload, StoredObject, WritingStore
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class Scan:
     cutoff: datetime
     live: dict[bytes, int]
     objects: tuple[ListedObject, ...]
-    unfinished: tuple[UnfinishedUpload, ...]
+    unfinished: tuple[PendingUpload, ...]
 
     def is_old(self, moment: datetime) -> bool:
         return moment < self.cutoff
@@ -67,6 +67,22 @@ def scan(catalog: Catalog, store: WritingStore, grace_hours: int, scope: str) ->
     return Scan(scope, now - timedelta(hours=grace_hours), live, objects, unfinished)
 
 
+def _still_missing(catalog: Catalog, store: WritingStore, scope: str, checksum: bytes) -> bool:
+    """True when the address, listed as live before the store was, is still live and the store still lacks its object.
+
+    Asked under the address lock, so a deletion whose transaction is running has committed (the address is no longer
+    live) or not begun (the object is there) by the time it answers: a deletion in progress is never a finding.
+    """
+    project = catalog.project
+    key = _layout.object_key(project.name, scope, checksum)
+
+    def work(tx: Connection) -> bool:
+        _archivum.lock_address(tx, project.project_id, scope, checksum)
+        return _archivum.address_is_live(tx, project.project_id, scope, checksum) and store.head(key) is None
+
+    return catalog.transaction(f"Re-reading whether object {_layout.short_checksum(checksum)} is missing", work)
+
+
 def _checksum_of(project: str, scope: str, key: str) -> bytes | None:
     """The checksum a listed object key names in *scope*, or None for a key that is not an object's."""
     parsed = _layout.parse_object_key(key.removeprefix(f"{project}/"))
@@ -78,9 +94,10 @@ def reconcile(catalog: Catalog, store: WritingStore, grace_hours: int, scope: st
 
     `object_without_entry`: an object that is not live and is older than the grace period (an unparseable key under
     `_objects` too, with no checksum). `entry_without_object`: a live address the store does not hold (no grace: a
-    put writes its object before its registration). `unfinished_upload`: older than the grace period. Younger
-    objects and uploads are only counted. One `archive_check` (kind `reconciliation`) and a finding per
-    disagreement are recorded in one transaction; an agreement records no finding.
+    put writes its object before its registration), still live when asked again after the listing. `unfinished_upload`:
+    older than the grace period; it is reported, never aborted. Younger objects and uploads are only counted. One
+    `archive_check` (kind `reconciliation`) and a finding per disagreement are recorded in one transaction; an
+    agreement records no finding.
     """
     project = catalog.project
     found = scan(catalog, store, grace_hours, scope)
@@ -98,7 +115,7 @@ def reconcile(catalog: Catalog, store: WritingStore, grace_hours: int, scope: st
         size = None if checksum is None else stored.size
         findings.append(Finding(_ids.uuid7(), scope, checksum, size, "object_without_entry"))
     for checksum, size in found.live.items():
-        if checksum not in listed:
+        if checksum not in listed and _still_missing(catalog, store, scope, checksum):
             findings.append(Finding(_ids.uuid7(), scope, checksum, size, "entry_without_object"))
     for upload in found.unfinished:
         if found.is_old(upload.started):

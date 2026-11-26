@@ -658,3 +658,20 @@ def record_confirmed_deletion(archivum: Archivum, artifact: Artifact) -> None:
         for deletion_id, stage, intent in ((intent_id, "intent", None), (outcome_id, "confirmed", intent_id)):
             params = (deletion_id, _ids.uuid7_time(deletion_id), artifact.scope, artifact.checksum, artifact.size)
             su.execute(insert, (*params, stage, intent))
+
+
+def backdate_registration(archivum: Archivum, artifact: Artifact, days: int) -> None:
+    """Make the registration of *artifact* *days* older, as the test (a superuser) tampering with its database.
+
+    Retention counts an object's age from the registration's `recorded_at`, which the database stamps itself and
+    the append-only trigger refuses to change, so the only way to test an age is to switch the triggers off for
+    one transaction of the throwaway database (`session_replication_role = replica`, a superuser's setting,
+    local to the transaction) and move the stamp back.
+    """
+    with archivum.superuser() as su, su.transaction():
+        su.execute("SET LOCAL session_replication_role = replica")
+        su.execute(
+            "UPDATE ulduar.archive_registration SET recorded_at = recorded_at - make_interval(days => %s)"
+            " WHERE artifact_id = %s",
+            (days, artifact.artifact_id),
+        )

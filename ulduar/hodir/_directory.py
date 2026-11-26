@@ -29,8 +29,8 @@ from ulduar.errors import ArchiveUnavailable, ConfigurationError, IntegrityError
 from ulduar.hodir._store import (
     CHUNK_SIZE,
     DeletingStore,
+    PendingUpload,
     StoredObject,
-    UnfinishedUpload,
     WritingStore,
     check_key,
     check_size,
@@ -256,16 +256,16 @@ class DirectoryStore:
         found = [_stored(key, status) for key, status in self._files(prefix) if not _is_temporary(key)]
         return iter(sorted(found, key=lambda stored: stored.key))
 
-    def list_unfinished(self, prefix: str) -> Iterator[UnfinishedUpload]:
+    def list_unfinished(self, prefix: str) -> Iterator[PendingUpload]:
         check_key(prefix, allow_root=True)
         found = [
-            UnfinishedUpload(key, "", datetime.fromtimestamp(status.st_mtime, UTC))
+            PendingUpload(key, "", datetime.fromtimestamp(status.st_mtime, UTC))
             for key, status in self._files(prefix)
             if _is_temporary(key)
         ]
         return iter(sorted(found, key=lambda upload: upload.key))
 
-    def abort_unfinished(self, upload: UnfinishedUpload) -> None:
+    def abort_unfinished(self, upload: PendingUpload) -> None:
         """Remove the temporary file; refuses any key that is not one, so a stored object can never go this way."""
         segments = check_key(upload.key).split("/")
         if not segments[-1].startswith(TEMP_PREFIX):

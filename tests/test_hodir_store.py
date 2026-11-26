@@ -40,8 +40,8 @@ from ulduar.hodir._store import (
     MIB,
     MIN_PART_SIZE,
     MULTIPART_THRESHOLD,
+    PendingUpload,
     StoredObject,
-    UnfinishedUpload,
     check_key,
     open_store,
     part_size,
@@ -286,7 +286,7 @@ def test_a_stray_temporary_file_is_an_unfinished_upload_of_a_directory(archive_s
     assert [u.key for u in store.list_unfinished("a")] == ["a/.tmp-abc"]
     assert list(store.list_unfinished("b")) == []
     with pytest.raises(ValueError, match="not an unfinished upload"):  # a stored object can never go this way
-        store.abort_unfinished(UnfinishedUpload("a/one", "", FLOOR))
+        store.abort_unfinished(PendingUpload("a/one", "", FLOOR))
     store.abort_unfinished(unfinished[0])
     store.abort_unfinished(unfinished[0])  # already gone: not an error
     assert not stray.exists() and list(store.list_unfinished("")) == []
@@ -584,7 +584,7 @@ def test_a_bad_key_is_refused_by_every_call_before_any_io(settings: ArchiveSetti
         lambda: store.put_bytes_new(key, b"x"),
         lambda: store.head(key),
         lambda: store.read(key),
-        lambda: store.abort_unfinished(UnfinishedUpload(key, "", FLOOR)),
+        lambda: store.abort_unfinished(PendingUpload(key, "", FLOOR)),
         lambda: store.delete_every_version(key),
         lambda: store.any_version_left(key),
     ]

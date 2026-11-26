@@ -31,7 +31,7 @@ from ulduar import _db
 from ulduar.config import ArchiveSettings, CredentialSettings
 from ulduar.errors import ArchiveUnavailable, ConfigurationError, IntegrityError
 from ulduar.hodir import _store
-from ulduar.hodir._store import DeletingStore, StoredObject, UnfinishedUpload, WritingStore, check_key, check_size
+from ulduar.hodir._store import DeletingStore, PendingUpload, StoredObject, WritingStore, check_key, check_size
 
 logger = logging.getLogger(__name__)
 
@@ -248,20 +248,20 @@ class S3Store:
         ]
         return iter(sorted(found, key=lambda stored: stored.key))
 
-    def list_unfinished(self, prefix: str) -> Iterator[UnfinishedUpload]:
+    def list_unfinished(self, prefix: str) -> Iterator[PendingUpload]:
         check_key(prefix, allow_root=True)
         # NOTE: no server-side `Prefix`: MinIO reads it as one exact key and lists nothing else, so the bucket's
         # unfinished uploads (few, by nature) are filtered here, which any S3 server answers the same way.
         under = self._under(prefix)
         found = [
-            UnfinishedUpload(self._relative(item["Key"]), item["UploadId"], item["Initiated"].astimezone(UTC))
+            PendingUpload(self._relative(item["Key"]), item["UploadId"], item["Initiated"].astimezone(UTC))
             for page in self._pages("list_multipart_uploads", "Listing", prefix)
             for item in page.get("Uploads", [])
             if item["Key"].startswith(under)
         ]
         return iter(sorted(found, key=lambda upload: (upload.key, upload.upload_id)))
 
-    def abort_unfinished(self, upload: UnfinishedUpload) -> None:
+    def abort_unfinished(self, upload: PendingUpload) -> None:
         check_key(upload.key)
         with _translated("Aborting", upload.key):
             try:

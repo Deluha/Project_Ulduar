@@ -12,7 +12,7 @@ binds values as parameters (hard rule 3).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -42,14 +42,15 @@ _LIVE = sql.SQL(
     " WHERE r.project_id = %(project_id)s AND r.scope = %(scope)s AND {archived}(r.project_id, r.artifact_id)"
 ).format(registration=ARCHIVE_REGISTRATION, artifact=qualified("artifact"), archived=ARTIFACT_IS_ARCHIVED)
 _SELECT_LIVE = sql.SQL("{} ORDER BY checksum").format(_LIVE)
-# The sample: the live addresses whose latest passed finding (by the database's clock) is oldest, never-passed first.
+# The sample: the live addresses whose latest verification finding, of any outcome (by the database's clock), is
+# oldest, never-verified first.
 _SELECT_SAMPLE = sql.SQL(
     "WITH live AS ({live}) SELECT l.checksum, l.size_bytes FROM live l"
-    " LEFT JOIN LATERAL (SELECT max(f.recorded_at) AS last_passed FROM {finding} f"
-    " WHERE f.project_id = %(project_id)s AND f.scope = %(scope)s AND f.checksum = l.checksum"
-    " AND f.outcome = 'passed') p ON true"
-    " ORDER BY p.last_passed NULLS FIRST, l.checksum LIMIT %(n)s"
-).format(live=_LIVE, finding=qualified("archive_finding"))
+    " LEFT JOIN LATERAL (SELECT max(f.recorded_at) AS last_verified FROM {finding} f"
+    " JOIN {check} c ON c.project_id = f.project_id AND c.check_id = f.check_id AND c.kind = 'verification'"
+    " WHERE f.project_id = %(project_id)s AND f.scope = %(scope)s AND f.checksum = l.checksum) p ON true"
+    " ORDER BY p.last_verified NULLS FIRST, l.checksum LIMIT %(n)s"
+).format(live=_LIVE, finding=qualified("archive_finding"), check=qualified("archive_check"))
 _INSERT_CHECK = sql.SQL(
     "INSERT INTO {} (project_id, check_id, event_at, scope, kind, mode, objects_checked, findings)"
     " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
@@ -70,8 +71,8 @@ _LATEST_RULES = sql.SQL(
     " WHERE project_id = %s ORDER BY retention_class, recorded_at DESC, rule_id DESC"
 ).format(_RULE)
 _LIVE_REGISTRATIONS = sql.SQL(
-    "SELECT r.scope, x.checksum, x.size_bytes, r.artifact_id, x.event_at, x.dataset_id, r.retention_class,"
-    " r.recorded_at FROM {registration} r"
+    "SELECT r.scope, x.checksum, x.size_bytes, r.artifact_id, x.dataset_id, r.retention_class, r.recorded_at"
+    " FROM {registration} r"
     " JOIN {artifact} x ON x.project_id = r.project_id AND x.artifact_id = r.artifact_id AND x.event_at = r.event_at"
     " WHERE r.project_id = %(project_id)s AND (%(scope)s::text IS NULL OR r.scope = %(scope)s)"
     " AND {archived}(r.project_id, r.artifact_id) ORDER BY r.scope, x.checksum, r.artifact_id"
@@ -162,7 +163,8 @@ def insert_registration(
 ) -> None:
     """Register *artifact*'s object; registering it again with the same retention class changes nothing.
 
-    `UlduarError` when the artifact is already registered with another class: a class is fixed at archive time.
+    `UlduarError` when the artifact is already registered with another class (a class is fixed at archive time) or
+    when it is registered but its object was deleted after that (a retry of a put whose record id came too late).
     """
     params = (project_id, scope, artifact.artifact_id, artifact.event_at, retention_class)
     if tx.execute(_INSERT_REGISTRATION, params).fetchone() is not None:
@@ -171,6 +173,10 @@ def insert_registration(
     if row is None or row[0] != retention_class:
         old = None if row is None else row[0]
         raise UlduarError(f"Artifact {artifact.artifact_id} is already archived with retention class {old!r}")
+    if not is_archived(tx, project_id, artifact.artifact_id):
+        raise UlduarError(
+            f"Artifact {artifact.artifact_id} was deleted from the archive; put it again under a new record id"
+        )
 
 
 def live_addresses(tx: Connection, project_id: UUID, scope: str) -> list[tuple[bytes, int]]:
@@ -180,7 +186,7 @@ def live_addresses(tx: Connection, project_id: UUID, scope: str) -> list[tuple[b
 
 
 def sample_addresses(tx: Connection, project_id: UUID, scope: str, n: int) -> list[tuple[bytes, int]]:
-    """The *n* live addresses whose latest passed finding is oldest, those never passed first."""
+    """The *n* live addresses whose latest verification finding (any outcome) is oldest, never-verified first."""
     rows = tx.execute(_SELECT_SAMPLE, {"project_id": project_id, "scope": scope, "n": n}).fetchall()
     return [(row[0], row[1]) for row in rows]
 
@@ -371,6 +377,22 @@ def open_intents(tx: Connection, project: Project, scope: str | None, cause: str
     """Every intent of a deletion of *cause* with no outcome yet, in *scope* (None: every scope)."""
     params = {"project_id": project.project_id, "scope": scope, "cause": cause}
     return [_deletion_record(project, row) for row in tx.execute(_OPEN_INTENTS, params).fetchall()]
+
+
+def open_intents_outside(
+    tx: Connection, project: Project, scope: str | None, cause: str, wanted: Collection[tuple[str, bytes]]
+) -> list[DeletionRecord]:
+    """The open intents of *cause* in *scope* (None: every scope) whose object is not among *wanted*, one per object.
+
+    *wanted* are the (scope, checksum) addresses the caller deletes anyway; an intent left open for any other is
+    one the caller must still settle. Of several intents of one object the oldest is the one returned.
+    """
+    found: dict[tuple[str, bytes], DeletionRecord] = {}
+    for intent in open_intents(tx, project, scope, cause):
+        address = (intent.scope, intent.checksum)
+        if address not in wanted and address not in found:
+            found[address] = intent
+    return list(found.values())
 
 
 def database_now(tx: Connection) -> datetime:

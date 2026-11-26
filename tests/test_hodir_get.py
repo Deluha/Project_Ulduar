@@ -154,6 +154,15 @@ def test_a_get_logs_the_artifact_the_short_checksum_and_the_size_but_no_destinat
         assert "private-folder-name" not in message and str(target) not in message
 
 
+def test_a_destination_name_of_the_longest_length_is_got_because_the_partial_file_carries_no_name(
+    config: Config, source: Path, target: Path
+) -> None:
+    stored = archive_file(config, source)
+    with open_archive(config) as session:
+        destination = session.get(stored, target / ("n" * 250))
+    assert destination.read_bytes() == CONTENT and leftovers(target) == ["n" * 250]
+
+
 # --- verification: a tampered or vanished object is never handed over ---
 
 

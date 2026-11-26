@@ -27,9 +27,9 @@ from ulduar.hodir._records import (
     Rebuild,
     Reconciliation,
     RetentionRun,
+    UnfinishedUpload,
     Verification,
 )
-from ulduar.hodir._store import UnfinishedUpload
 from ulduar.hodir.archive import Archive, PutSink, open_archive
 from ulduar.hodir.cleanup import clean_incomplete
 from ulduar.hodir.retention import apply_retention, declare_retention

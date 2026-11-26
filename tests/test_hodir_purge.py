@@ -33,7 +33,7 @@ from ulduar.config import ArchiveSettings, Config
 from ulduar.errors import ConfigurationError, UlduarError, UnknownRecordError
 from ulduar.freya import Artifact
 from ulduar.hodir import _layout, open_archive, purge
-from ulduar.hodir import _purge as purge_module
+from ulduar.hodir import _store as store_module
 from ulduar.hodir._store import DeletingStore, open_store
 
 BACKENDS = [*ARCHIVE_BACKENDS, pytest.param("s3-versioned", id="s3-versioned", marks=pytest.mark.s3)]
@@ -229,7 +229,7 @@ def test_a_bad_argument_is_refused_before_any_store_call(
     message: str,
 ) -> None:
     put(config, tmp_path)
-    monkeypatch.setattr(purge_module, "open_store", lambda settings, *, deleting=False: UntouchedStore())
+    monkeypatch.setattr(store_module, "open_store", lambda settings, *, deleting=False: UntouchedStore())
     given: dict[str, Any] = {"scope": "default", "checksum": digest_of(MISTAKE), "reason": REASON} | arguments
     with pytest.raises(error, match=message):
         purge(config, **given)
@@ -311,7 +311,7 @@ def test_a_put_between_the_intent_and_the_deletion_cancels_the_purge_and_a_secon
             racing.append(pool.submit(put, config, tmp_path).result(timeout=30))
 
         monkeypatch.setattr(
-            purge_module,
+            store_module,
             "open_store",
             lambda settings, *, deleting=False: HookedStore(open_store(settings, deleting=deleting), put_the_same),
         )
@@ -322,7 +322,7 @@ def test_a_put_between_the_intent_and_the_deletion_cancels_the_purge_and_a_secon
     with open_archive(config) as session:
         session.get(racing[0], tmp_path / "new")
         session.get(old, tmp_path / "old")
-    monkeypatch.setattr(purge_module, "open_store", open_store)
+    monkeypatch.setattr(store_module, "open_store", open_store)
     second = purge_it(config)
     assert second.stage == "confirmed" and second.deletion_id != outcome.deletion_id
     assert gone(store_of(config), object_key_of(old), manifest_key_of(old), manifest_key_of(racing[0]))

@@ -18,15 +18,14 @@ from uuid import UUID
 
 from ulduar._schema import REDACTION_REASONS, check_checksum
 from ulduar.config import Config, check_name
-from ulduar.errors import ConfigurationError, UlduarError, UnknownRecordError
+from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import Connection, open_catalog
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._deletion import delete_address, manifest_keys
 from ulduar.hodir._layout import DeletionRecord
 from ulduar.hodir._records import DeletionOutcome
-from ulduar.hodir._store import open_store
+from ulduar.hodir._store import open_maintenance_store
 from ulduar.hodir._sync import sync_records
-from ulduar.hodir.archive import _ensure_format
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +55,11 @@ def purge(config: Config, *, scope: str, checksum: bytes, reason: str) -> Deleti
     `ConfigurationError` without `[archive]` or the deleter; `ValueError` for a bad *scope*, *checksum* or *reason*,
     before any I/O; `UnknownRecordError` for a scope the project lacks or an object it does not know.
     """
-    settings = config.archive
-    if settings is None:
-        raise ConfigurationError("Configuration key `archive` is required to use the archive")
     check_name(scope, "scope")
     check_checksum(checksum)
     if reason not in REDACTION_REASONS:
         raise ValueError(f"Reason {reason!r} is not one of {', '.join(REDACTION_REASONS)}")
     short = _layout.short_checksum(checksum)
-    store = open_store(settings, deleting=True)
     with open_catalog(config) as catalog:
         project = catalog.project
 
@@ -77,7 +72,8 @@ def purge(config: Config, *, scope: str, checksum: bytes, reason: str) -> Deleti
             )
 
         known = catalog.transaction(f"Reading what is recorded of object {short} of scope {scope}", read)
-        _ensure_format(store)
+        _, store, deleting = open_maintenance_store(config, deleting=True)
+        assert deleting is not None  # asked for above
         stored = store.head(_layout.object_key(project.name, scope, checksum))
         if not known.artifact_ids and stored is None:
             raise UnknownRecordError(f"No archived object {short} in scope {scope}")
@@ -96,7 +92,7 @@ def purge(config: Config, *, scope: str, checksum: bytes, reason: str) -> Deleti
             return DeletionOutcome(scope, checksum, size, None, "skipped", CAUSE, "the object is already gone")
         outcome = delete_address(
             catalog,
-            store,
+            deleting,
             project,
             scope,
             checksum,

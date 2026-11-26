@@ -32,6 +32,7 @@ from tests.conftest import (
     TEST_BUCKET_PREFIX,
     Archivum,
     archive_config,
+    backdate_registration,
     count,
     digest,
     failure,
@@ -46,6 +47,7 @@ from ulduar.config import ArchiveSettings, Config
 from ulduar.errors import (
     ArchiveFormatError,
     ArchiveUnavailable,
+    ArchivumUnavailable,
     ConfigurationError,
     UlduarError,
     UnknownRecordError,
@@ -64,10 +66,11 @@ from ulduar.hodir import (
     _archivum,
     _layout,
     apply_retention,
+    clean_incomplete,
     declare_retention,
     open_archive,
 )
-from ulduar.hodir import retention as retention_module
+from ulduar.hodir import _store as store_module
 from ulduar.hodir._records import LatestRule, LiveRegistration
 from ulduar.hodir._store import DeletingStore, open_store
 from ulduar.hodir.retention import _shortens, due_addresses
@@ -102,15 +105,14 @@ def registration(
     dataset: uuid.UUID | None = None,
     scope: str = "default",
 ) -> LiveRegistration:
-    """A live registration of an artifact *days* before `NOW`."""
+    """A live registration recorded *days* before `NOW`."""
     moment = NOW - timedelta(days=days)
     artifact_id = _ids.uuid7(int(moment.timestamp() * 1000))
-    return LiveRegistration(
-        scope, checksum or digest("content"), 7, artifact_id, moment, dataset, retention_class, moment
-    )
+    return LiveRegistration(scope, checksum or digest("content"), 7, artifact_id, dataset, retention_class, moment)
 
 
 def put(
+    archivum: Archivum,
     config: Config,
     tmp_path: Path,
     content: bytes,
@@ -119,19 +121,27 @@ def put(
     retention_class: str | None = "short",
     dataset: Dataset | None = None,
     scope: str | None = None,
+    artifact_days: int | None = None,
 ) -> Artifact:
-    """Archive *content* as an artifact *days* old (its id carries the time) in its own session."""
+    """Archive *content* in its own session, registered *days* ago (`backdate_registration`: the age retention counts).
+
+    The artifact's own id carries the same age unless *artifact_days* says otherwise, so a test can tell the
+    artifact's time from the registration's.
+    """
     path = tmp_path / f"content-{next(_FILES)}.bin"
     path.write_bytes(content)
     with open_archive(config) as session:
-        return session.put_file(
+        artifact = session.put_file(
             path,
             "report",
             dataset=dataset,
             scope=scope,
             retention_class=retention_class,
-            record_id=_ids.uuid7(ms_ago(days)),
+            record_id=_ids.uuid7(ms_ago(days if artifact_days is None else artifact_days)),
         )
+    if days:
+        backdate_registration(archivum, artifact, days)
+    return artifact
 
 
 def declare(config: Config, retention_class: str, keep_days: int | None, **keywords: Any) -> Any:
@@ -187,10 +197,14 @@ def sorted_by_checksum(*artifacts: Artifact) -> list[Artifact]:
 
 
 class HookedStore:
-    """A deleting store that forwards to a real one and runs a test's hook at one chosen step.
+    """A deleting store that forwards to a real one and runs a test's hook or fault at one chosen step.
 
     `on_first_record` runs before the first record is written (the intent's), `on_first_delete` before the first
-    object is deleted, `fail_first_delete` makes that delete an `ArchiveUnavailable` instead; each fires once.
+    object is deleted, `after_first_delete` once it has been, `on_first_manifest_delete` before the first manifest
+    is. `fail_first_delete` makes the first object delete fail instead (an `ArchiveUnavailable`, or the exception
+    it is given); `fail_after_first_delete` lets that delete happen and then fails, as a connection lost after the
+    store answered would; `fail_manifests` makes every manifest delete an `ArchiveUnavailable`. Each hook and fault
+    fires once, but `fail_manifests`.
     """
 
     def __init__(
@@ -199,12 +213,20 @@ class HookedStore:
         *,
         on_first_record: Callable[[], None] | None = None,
         on_first_delete: Callable[[], None] | None = None,
-        fail_first_delete: bool = False,
+        on_first_manifest_delete: Callable[[], None] | None = None,
+        after_first_delete: Callable[[], None] | None = None,
+        fail_first_delete: bool | Exception = False,
+        fail_after_first_delete: bool = False,
+        fail_manifests: bool = False,
     ) -> None:
         self._store = store
         self._on_first_record = on_first_record
         self._on_first_delete = on_first_delete
+        self._on_first_manifest_delete = on_first_manifest_delete
+        self._after_first_delete = after_first_delete
         self._fail_first_delete = fail_first_delete
+        self._fail_after_first_delete = fail_after_first_delete
+        self._fail_manifests = fail_manifests
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._store, name)
@@ -216,19 +238,31 @@ class HookedStore:
         return self._store.put_bytes_new(key, data)
 
     def delete_every_version(self, key: str) -> None:
+        if "/_manifests/" in key:
+            if self._on_first_manifest_delete is not None:
+                hook, self._on_first_manifest_delete = self._on_first_manifest_delete, None
+                hook()
+            if self._fail_manifests:
+                raise ArchiveUnavailable(f"Deleting {key} failed: injected")
         if "/_objects/" in key and self._on_first_delete is not None:
             hook, self._on_first_delete = self._on_first_delete, None
             hook()
         if "/_objects/" in key and self._fail_first_delete:
-            self._fail_first_delete = False
-            raise ArchiveUnavailable(f"Deleting {key} failed: injected")
+            fault, self._fail_first_delete = self._fail_first_delete, False
+            raise fault if isinstance(fault, Exception) else ArchiveUnavailable(f"Deleting {key} failed: injected")
         self._store.delete_every_version(key)
+        if "/_objects/" in key and self._after_first_delete is not None:
+            hook, self._after_first_delete = self._after_first_delete, None
+            hook()
+        if "/_objects/" in key and self._fail_after_first_delete:
+            self._fail_after_first_delete = False
+            raise ArchiveUnavailable(f"Deleting {key} failed: injected after the delete")
 
 
 def hook_store(monkeypatch: pytest.MonkeyPatch, **hooks: Any) -> None:
     """Make `apply_retention` open its store through a `HookedStore` over the real one."""
     monkeypatch.setattr(
-        retention_module,
+        store_module,
         "open_store",
         lambda settings, *, deleting=False: HookedStore(open_store(settings, deleting=deleting), **hooks),
     )
@@ -247,7 +281,7 @@ def test_without_a_class_a_rule_or_a_limit_nothing_is_due() -> None:
     assert due_addresses([], RULES, NOW) == []
 
 
-def test_a_registration_expires_when_its_artifact_is_older_than_keep_days() -> None:
+def test_a_registration_expires_when_it_was_recorded_longer_ago_than_keep_days() -> None:
     expired, young = registration(days=31), registration(days=29, checksum=digest("b"))
     assert [d.checksum for d in due_addresses([expired, young], RULES, NOW)] == [expired.checksum]
     exactly = registration(days=30)
@@ -265,6 +299,15 @@ def test_keep_newest_protects_the_newest_registrations_of_a_dataset_whatever_the
     # the newest of the dataset is of no class, yet it holds the one protected place
     other = registration(days=1, dataset=dataset, retention_class=None, checksum=digest("other"))
     assert len(due_addresses([*series, other], RULES, NOW)) == 3
+
+
+def test_keep_newest_ranks_by_when_the_registration_was_recorded_not_by_the_artifact_id() -> None:
+    dataset = uuid.uuid4()
+    low, high = sorted((_ids.uuid7(), _ids.uuid7()))
+    recorded_first = LiveRegistration("default", digest("a"), 7, high, dataset, "short", NOW - timedelta(days=100))
+    recorded_last = LiveRegistration("default", digest("b"), 7, low, dataset, "short", NOW - timedelta(days=90))
+    [due] = due_addresses([recorded_first, recorded_last], RULES, NOW)
+    assert due.checksum == recorded_first.checksum  # the higher artifact id is not the newest; the later record is
 
 
 def test_a_registration_without_a_dataset_is_not_protected_by_keep_newest() -> None:
@@ -317,7 +360,8 @@ def test_due_addresses_are_ordered_by_scope_and_checksum() -> None:
         ((None, 1), (30, 1), True),
         ((None, 1), (None, 1), False),
         ((30, 2), (60, 1), True),
-        ((None, 2), (None, 1), True),
+        ((None, 2), (None, 1), False),  # a rule that keeps for ever shortens nothing, whatever its keep_newest
+        ((30, 2), (None, 0), False),
         ((30, 1), (60, 5), False),
     ],
 )
@@ -439,7 +483,6 @@ def test_a_lengthening_rule_needs_no_confirmation_and_is_not_marked(archivum: Ar
         ({"keep_days": 60}, {"keep_days": 30}),
         ({"keep_days": None}, {"keep_days": 30}),
         ({"keep_days": 30, "keep_newest": 3}, {"keep_days": 30, "keep_newest": 2}),
-        ({"keep_days": None, "keep_newest": 3}, {"keep_days": None, "keep_newest": 0}),
     ],
 )
 def test_a_shortening_rule_is_refused_unless_confirmed_and_then_recorded(
@@ -453,6 +496,18 @@ def test_a_shortening_rule_is_refused_unless_confirmed_and_then_recorded(
     confirmed = declare(config, "short", second["keep_days"], keep_newest=second.get("keep_newest", 1))
     assert confirmed.shortening_confirmed is True
     assert [row[3] for row in rule_rows(archivum)][1:] == [True]
+
+
+def test_a_rule_that_keeps_for_ever_is_never_a_shortening_whatever_its_keep_newest(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    config = onboarded(archivum, tmp_path)
+    declare_retention(config, "alpha", "short", None, keep_newest=3)
+    rule = declare_retention(config, "alpha", "short", None, keep_newest=0)
+    assert rule.shortening_confirmed is False
+    again = declare_retention(config, "alpha", "short", 30, keep_newest=0, confirm_shortening=True)
+    assert again.shortening_confirmed is True  # a limit after for ever is one
+    assert [row[3] for row in rule_rows(archivum)] == [False, False, True]
 
 
 def test_the_latest_rule_of_a_class_is_the_one_read_back(archivum: Archivum, tmp_path: Path) -> None:
@@ -562,17 +617,15 @@ def test_declaring_waits_for_the_retention_lock_of_its_project_and_class(archivu
 # --- apply_retention: arguments and the dry run ---
 
 
-def test_apply_needs_the_archive_section_a_timezone_aware_now_and_a_known_scope(
-    archivum: Archivum, tmp_path: Path
-) -> None:
+def test_apply_needs_the_archive_section(archivum: Archivum, tmp_path: Path) -> None:
     bare = onboarded(archivum, tmp_path)
     with pytest.raises(ConfigurationError, match="`archive` is required"):
         apply_retention(bare)
 
 
-def test_a_naive_now_and_a_bad_or_unknown_scope_are_refused(config: Config) -> None:
-    with pytest.raises(ValueError, match="timezone-aware"):
-        apply_retention(config, now=datetime(2026, 1, 1))
+def test_a_bad_or_unknown_scope_is_refused_and_there_is_no_now_to_give(config: Config) -> None:
+    with pytest.raises(TypeError, match="now"):
+        apply_retention(config, now=datetime(2026, 1, 1))  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="scope"):
         apply_retention(config, scope="Bad Scope")
     with pytest.raises(UnknownRecordError, match="Scope elsewhere is not onboarded for project alpha"):
@@ -580,9 +633,9 @@ def test_a_naive_now_and_a_bad_or_unknown_scope_are_refused(config: Config) -> N
 
 
 def test_a_dry_run_lists_what_is_due_and_deletes_nothing(config: Config, archivum: Archivum, tmp_path: Path) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
-    put(config, tmp_path, b"young", days=1)
-    put(config, tmp_path, b"classless", days=OLD, retention_class=None)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    put(archivum, config, tmp_path, b"young", days=1)
+    put(archivum, config, tmp_path, b"classless", days=OLD, retention_class=None)
     rule = declare(config, "short", 30)
     run = apply_retention(config)
     assert isinstance(run, RetentionRun)
@@ -593,9 +646,9 @@ def test_a_dry_run_lists_what_is_due_and_deletes_nothing(config: Config, archivu
 
 
 def test_a_dry_run_opens_the_writing_store_only_and_a_real_run_needs_the_deleter(
-    config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     assert config.archive is not None
     if config.archive.backend == "s3":
@@ -627,10 +680,10 @@ def test_a_config_without_a_deleter_is_refused_by_a_real_run(
 def test_a_real_run_deletes_the_due_objects_and_their_manifests_and_records_each_deletion(
     config: Config, archivum: Archivum, tmp_path: Path
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
-    classless = put(config, tmp_path, b"classless", days=OLD, retention_class=None)
-    longer = put(config, tmp_path, b"longer", days=OLD, retention_class="long")
-    young = put(config, tmp_path, b"young", days=1)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    classless = put(archivum, config, tmp_path, b"classless", days=OLD, retention_class=None)
+    longer = put(archivum, config, tmp_path, b"longer", days=OLD, retention_class="long")
+    young = put(archivum, config, tmp_path, b"young", days=1)
     rule = declare(config, "short", 30)
     declare(config, "long", 365)
     run = apply_retention(config, dry_run=False)
@@ -658,7 +711,7 @@ def test_a_real_run_deletes_the_due_objects_and_their_manifests_and_records_each
 def test_both_deletion_records_are_in_the_store_and_decode_to_the_rows(
     config: Config, archivum: Archivum, tmp_path: Path
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     apply_retention(config, dry_run=False)
     records = {record.stage: record for record in stored_records(config)}
@@ -681,7 +734,7 @@ def test_both_deletion_records_are_in_the_store_and_decode_to_the_rows(
 def test_every_version_of_an_object_goes(
     config: Config, archivum: Archivum, tmp_path: Path, tamper: Callable[[str, bytes | None], None]
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     tamper(object_key_of(due), b"overwritten by someone else: a second version on a versioned bucket")
     run = apply_retention(config, dry_run=False)
@@ -693,7 +746,7 @@ def test_every_version_of_an_object_goes(
 def test_keep_newest_leaves_the_newest_of_a_dataset(config: Config, archivum: Archivum, tmp_path: Path) -> None:
     with open_catalog(config) as catalog:
         dataset = catalog.register_dataset("ns", "series")
-    artifacts = [put(config, tmp_path, f"v{d}".encode(), days=d, dataset=dataset) for d in (90, 80, 70)]
+    artifacts = [put(archivum, config, tmp_path, f"v{d}".encode(), days=d, dataset=dataset) for d in (90, 80, 70)]
     declare(config, "short", 30)
     run = apply_retention(config, dry_run=False)
     assert sorted(o.checksum for o in run.outcomes) == sorted(a.checksum for a in artifacts[:2])
@@ -703,7 +756,7 @@ def test_keep_newest_leaves_the_newest_of_a_dataset(config: Config, archivum: Ar
 
 
 def test_a_second_run_finds_nothing_more(config: Config, archivum: Archivum, tmp_path: Path) -> None:
-    put(config, tmp_path, b"due", days=OLD)
+    put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     assert len(apply_retention(config, dry_run=False).outcomes) == 1
     again = apply_retention(config, dry_run=False)
@@ -716,8 +769,8 @@ def test_a_scope_limits_the_run(config: Config, archivum: Archivum, tmp_path: Pa
 
     role = next(r.role for r in archivum.recorders if r.env == config.archivum.dsn_env)
     onboard_project(config, "alpha", role, scopes=("default", "other"))
-    here = put(config, tmp_path, b"here", days=OLD)
-    there = put(config, tmp_path, b"there", days=OLD, scope="other")
+    here = put(archivum, config, tmp_path, b"here", days=OLD)
+    there = put(archivum, config, tmp_path, b"there", days=OLD, scope="other")
     declare(config, "short", 30)
     assert sorted(d.scope for d in apply_retention(config).due) == ["default", "other"]
     run = apply_retention(config, dry_run=False, scope="other")
@@ -729,8 +782,8 @@ def test_a_scope_limits_the_run(config: Config, archivum: Archivum, tmp_path: Pa
 def test_history_retention_can_age_the_artifact_of_a_deleted_object_out(
     config: Config, archivum: Archivum, tmp_path: Path
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
-    kept = put(config, tmp_path, b"kept", days=OLD, retention_class=None)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    kept = put(archivum, config, tmp_path, b"kept", days=OLD, retention_class=None)
     declare(config, "short", 30)
     declare_history_retention(config, "alpha", "artifact", 30)
     before = apply_history_retention(config, dry_run=False)
@@ -751,7 +804,7 @@ def test_a_run_over_the_limit_deletes_nothing_unless_told_to(
 ) -> None:
     assert config.archive is not None
     limited = replace(config, archive=replace(config.archive, max_deletions_per_run=1))
-    first, second = (put(config, tmp_path, name, days=OLD) for name in (b"one", b"two"))
+    first, second = (put(archivum, config, tmp_path, name, days=OLD) for name in (b"one", b"two"))
     declare(config, "short", 30)
     with pytest.raises(
         UlduarError,
@@ -767,9 +820,9 @@ def test_a_run_over_the_limit_deletes_nothing_unless_told_to(
     assert all(store_of(config).head(object_key_of(a)) is None for a in (first, second))
 
 
-def test_a_run_of_exactly_the_limit_goes_ahead(config: Config, tmp_path: Path) -> None:
+def test_a_run_of_exactly_the_limit_goes_ahead(config: Config, archivum: Archivum, tmp_path: Path) -> None:
     assert config.archive is not None
-    put(config, tmp_path, b"one", days=OLD)
+    put(archivum, config, tmp_path, b"one", days=OLD)
     declare(config, "short", 30)
     run = apply_retention(replace(config, archive=replace(config.archive, max_deletions_per_run=1)), dry_run=False)
     assert [o.stage for o in run.outcomes] == ["confirmed"]
@@ -781,7 +834,7 @@ def test_a_run_of_exactly_the_limit_goes_ahead(config: Config, tmp_path: Path) -
 def test_an_unavailable_store_leaves_the_intent_open_and_the_run_goes_on_and_the_next_run_resumes(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first, second = sorted_by_checksum(*(put(config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
+    first, second = sorted_by_checksum(*(put(archivum, config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
     declare(config, "short", 30)
     hook_store(monkeypatch, fail_first_delete=True)
     run = apply_retention(config, dry_run=False)
@@ -791,7 +844,7 @@ def test_an_unavailable_store_leaves_the_intent_open_and_the_run_goes_on_and_the
     assert store.head(object_key_of(first)) is not None and store.head(object_key_of(second)) is None
     assert stages(archivum) == ["intent", "intent", "confirmed"]
     intent_id = run.outcomes[0].deletion_id
-    monkeypatch.setattr(retention_module, "open_store", open_store)
+    monkeypatch.setattr(store_module, "open_store", open_store)
     resumed = apply_retention(config, dry_run=False)
     [outcome] = resumed.outcomes
     assert (outcome.stage, outcome.deletion_id) == ("confirmed", intent_id)
@@ -803,7 +856,7 @@ def test_the_writer_credential_cannot_run_a_real_retention_and_the_deleter_resum
     archive_settings_s3: ArchiveSettings, archivum: Archivum, tmp_path: Path
 ) -> None:
     config = archive_config(archivum, tmp_path, archive_settings_s3)
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     assert archive_settings_s3.writer is not None
     as_writer = replace(config, archive=replace(archive_settings_s3, deleter=archive_settings_s3.writer))
@@ -842,7 +895,7 @@ def test_an_object_under_object_lock_stays_and_its_intent_stays_open(
     locked_archive_settings: ArchiveSettings, s3_client: Any, archivum: Archivum, tmp_path: Path
 ) -> None:
     config = archive_config(archivum, tmp_path, locked_archive_settings)
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     full_key = f"{locked_archive_settings.prefix}/{object_key_of(due)}"
     [version] = s3_client.list_object_versions(Bucket=locked_archive_settings.bucket, Prefix=full_key)["Versions"]
@@ -868,13 +921,13 @@ def test_an_object_under_object_lock_stays_and_its_intent_stays_open(
 def test_an_object_that_stops_being_due_meanwhile_is_skipped(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
-    first, second = sorted_by_checksum(*(put(config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
+    first, second = sorted_by_checksum(*(put(archivum, config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
     declare(config, "short", 30)
     second_content = b"one" if second.checksum == digest("one") else b"two"
 
     def meanwhile() -> None:
         if change == "a put":
-            put(config, tmp_path, second_content, days=0)
+            put(archivum, config, tmp_path, second_content, days=0)
         else:
             declare_retention(config, "alpha", "short", 365)
 
@@ -896,13 +949,13 @@ def test_an_object_that_stops_being_due_meanwhile_is_skipped(
 def test_a_put_between_the_intent_and_the_deletion_cancels_it(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = put(config, tmp_path, b"due", days=OLD)
+    old = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     with ThreadPoolExecutor(max_workers=1) as pool:
         racing: list[Artifact] = []
 
         def put_the_same() -> None:
-            racing.append(pool.submit(put, config, tmp_path, b"due", days=0).result(timeout=30))
+            racing.append(pool.submit(put, archivum, config, tmp_path, b"due", days=0).result(timeout=30))
 
         hook_store(monkeypatch, on_first_record=put_the_same)  # the intent is committed, the object not yet deleted
         run = apply_retention(config, dry_run=False)
@@ -919,13 +972,13 @@ def test_a_put_between_the_intent_and_the_deletion_cancels_it(
 def test_a_put_that_starts_while_the_deletion_holds_the_lock_uploads_the_object_again(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = put(config, tmp_path, b"due", days=OLD)
+    old = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     with ThreadPoolExecutor(max_workers=1) as pool:
         futures = []
 
         def start_a_put_and_wait_for_the_lock() -> None:
-            futures.append(pool.submit(put, config, tmp_path, b"due", days=0))
+            futures.append(pool.submit(put, archivum, config, tmp_path, b"due", days=0))
             wait_until_blocked(archivum)
 
         hook_store(monkeypatch, on_first_delete=start_a_put_and_wait_for_the_lock)
@@ -943,7 +996,7 @@ def test_a_put_that_starts_while_the_deletion_holds_the_lock_uploads_the_object_
 def test_a_rule_lengthened_between_the_intent_and_the_deletion_cancels_it(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     # the intent is committed, its record not yet written: the rule changes in between
     hook_store(monkeypatch, on_first_record=lambda: declare_retention(config, "alpha", "short", 365))
@@ -959,12 +1012,12 @@ def test_a_rule_lengthened_between_the_intent_and_the_deletion_cancels_it(
 def test_an_open_intent_whose_object_is_no_longer_due_is_listed_by_a_dry_run_and_cancelled_by_a_real_one(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     hook_store(monkeypatch, fail_first_delete=True)
     [refused] = apply_retention(config, dry_run=False).outcomes
     assert refused.stage == "open" and stages(archivum) == ["intent"]
-    monkeypatch.setattr(retention_module, "open_store", open_store)
+    monkeypatch.setattr(store_module, "open_store", open_store)
     assert apply_retention(config).open_intents == ()  # still due: the due list carries it
     rule = declare_retention(config, "alpha", "short", 365)
     dry = apply_retention(config)
@@ -988,7 +1041,7 @@ def test_an_open_intent_whose_object_is_no_longer_due_is_listed_by_a_dry_run_and
 def test_a_resumed_intent_is_cancelled_when_the_rule_is_lengthened_as_it_is_recorded_again(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     hook_store(monkeypatch, fail_first_delete=True)
     [refused] = apply_retention(config, dry_run=False).outcomes
@@ -1003,12 +1056,12 @@ def test_open_intents_do_not_count_towards_the_limit_and_other_causes_are_left_a
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert config.archive is not None
-    first, _ = sorted_by_checksum(*(put(config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
+    first, _ = sorted_by_checksum(*(put(archivum, config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
     declare(config, "short", 30)
     hook_store(monkeypatch, fail_first_delete=True)
     [refused, _] = apply_retention(config, dry_run=False).outcomes
     assert refused.checksum == first.checksum
-    monkeypatch.setattr(retention_module, "open_store", open_store)
+    monkeypatch.setattr(store_module, "open_store", open_store)
     with archivum.superuser() as su:  # an open intent of another cause is not retention's to settle
         su.execute(
             "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes,"
@@ -1017,7 +1070,7 @@ def test_open_intents_do_not_count_towards_the_limit_and_other_causes_are_left_a
             (*(lambda i: (i, _ids.uuid7_time(i)))(_ids.uuid7()), digest("stray")),
         )
     declare(config, "short", 365)  # the first object's intent is open and not due now
-    third = put(config, tmp_path, b"three", days=OLD, retention_class="other")
+    third = put(archivum, config, tmp_path, b"three", days=OLD, retention_class="other")
     declare(config, "other", 30)
     limited = replace(config, archive=replace(config.archive, max_deletions_per_run=1))
     run = apply_retention(limited, dry_run=False)  # one due object is the limit; the open intent is on top of it
@@ -1033,7 +1086,7 @@ def test_open_intents_do_not_count_towards_the_limit_and_other_causes_are_left_a
 def test_an_intent_another_run_settled_meanwhile_is_not_settled_twice(
     config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     fired: list[bool] = []
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1051,11 +1104,174 @@ def test_an_intent_another_run_settled_meanwhile_is_not_settled_twice(
     assert store_of(config).head(object_key_of(due)) is None
 
 
+# --- the age is the registration's, by the database's clock (H31) ---
+
+
+def test_an_objects_age_counts_from_its_registration_not_from_its_artifact(
+    config: Config, archivum: Archivum, tmp_path: Path
+) -> None:
+    put(archivum, config, tmp_path, b"fresh registration", days=0, artifact_days=OLD)
+    aged = put(archivum, config, tmp_path, b"aged registration", days=OLD, artifact_days=0)
+    declare(config, "short", 30)
+    assert [d.checksum for d in apply_retention(config).due] == [aged.checksum]
+
+
+# --- a deletion that is half done, one that is slow, and the manifests (B1, B3) ---
+
+
+def test_a_deletion_that_removed_the_object_and_failed_before_recording_it_is_confirmed_never_cancelled(
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+    hook_store(monkeypatch, fail_after_first_delete=True)
+    [refused] = apply_retention(config, dry_run=False).outcomes
+    assert refused.stage == "open" and stages(archivum) == ["intent"]
+    assert store_of(config).head(object_key_of(due)) is None  # the object went before the failure
+    monkeypatch.setattr(store_module, "open_store", open_store)
+    declare_retention(config, "alpha", "short", 365)  # no longer due: the intent would have been cancelled
+    [outcome] = apply_retention(config, dry_run=False).outcomes
+    assert (outcome.stage, outcome.deletion_id) == ("confirmed", refused.deletion_id)
+    assert stages(archivum) == ["intent", "confirmed"]
+    with open_archive(config) as session:
+        with pytest.raises(UnknownRecordError, match="is not in the archive"):
+            session.get_stream(due, open(os.devnull, "wb"))
+        assert [f.outcome for f in session.reconcile().findings] == []  # no entry without its object
+    assert store_of(config).head(manifest_key_of(due)) is None
+
+
+def test_the_manifests_go_after_the_outcome_is_committed_and_one_that_stays_is_only_logged(
+    config: Config,
+    archivum: Archivum,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+    hook_store(monkeypatch, fail_manifests=True)
+    caplog.set_level(logging.WARNING, logger="ulduar")
+    [outcome] = apply_retention(config, dry_run=False).outcomes
+    assert outcome.stage == "confirmed" and stages(archivum) == ["intent", "confirmed"]
+    store = store_of(config)
+    assert store.head(object_key_of(due)) is None and store.head(manifest_key_of(due)) is not None
+    assert any("was not deleted from the archive" in record.getMessage() for record in caplog.records)
+    assert clean_incomplete(config).adopt == ()  # a manifest with a registration is no claim and no adoption
+    with open_archive(config) as session:
+        assert session.reconcile().findings == ()
+
+
+def test_a_put_of_the_same_content_is_not_held_up_by_the_manifest_deletes(
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+    racing: list[Artifact] = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # the address lock is free by now: a put waiting on it would not finish and `result` would time out
+        hook_store(
+            monkeypatch,
+            on_first_manifest_delete=lambda: racing.append(
+                pool.submit(put, archivum, config, tmp_path, b"due").result(timeout=30)
+            ),
+        )
+        [outcome] = apply_retention(config, dry_run=False).outcomes
+    [again] = racing
+    assert outcome.stage == "confirmed"
+    store = store_of(config)
+    assert store.head(manifest_key_of(due)) is None  # only the manifests the transaction listed went
+    assert store.head(object_key_of(again)) is not None and store.head(manifest_key_of(again)) is not None
+    with open_archive(config) as session:
+        session.get_stream(again, open(os.devnull, "wb"))
+
+
+def test_an_archivum_that_is_too_slow_in_the_deletion_leaves_the_intent_open_and_the_run_goes_on(
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second = sorted_by_checksum(*(put(archivum, config, tmp_path, name, days=OLD) for name in (b"one", b"two")))
+    declare(config, "short", 30)
+    hook_store(monkeypatch, fail_first_delete=ArchivumUnavailable("Deleting the object failed: slow"))
+    run = apply_retention(config, dry_run=False)
+    assert [(o.checksum, o.stage) for o in run.outcomes] == [(first.checksum, "open"), (second.checksum, "confirmed")]
+    assert run.outcomes[0].detail is not None and "slow" in run.outcomes[0].detail
+    assert stages(archivum) == ["intent", "intent", "confirmed"]
+
+
+def test_a_reconciliation_during_a_deletion_does_not_report_the_object_it_is_removing(
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+
+    def reconcile_it() -> Any:
+        with open_archive(config) as session:
+            return session.reconcile()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        futures = []
+
+        def reconcile_with_the_object_gone_and_the_deletion_uncommitted() -> None:
+            futures.append(pool.submit(reconcile_it))
+            wait_until_blocked(archivum)  # it saw the address live and the object missing, and waits for the lock
+
+        hook_store(monkeypatch, after_first_delete=reconcile_with_the_object_gone_and_the_deletion_uncommitted)
+        [outcome] = apply_retention(config, dry_run=False).outcomes
+        reconciled = futures[0].result(timeout=30)
+    assert outcome.stage == "confirmed" and store_of(config).head(object_key_of(due)) is None
+    assert reconciled.findings == ()
+
+
+def test_a_retried_put_whose_object_was_deleted_since_is_refused_and_registers_nothing(
+    config: Config, archivum: Archivum, tmp_path: Path
+) -> None:
+    record_id = _ids.uuid7()
+    path = tmp_path / "once.bin"
+    path.write_bytes(b"due")
+    with open_archive(config) as session:
+        artifact = session.put_file(path, "report", retention_class="short", record_id=record_id)
+    backdate_registration(archivum, artifact, OLD)
+    declare(config, "short", 30)
+    assert [o.stage for o in apply_retention(config, dry_run=False).outcomes] == ["confirmed"]
+    with open_archive(config) as session:
+        with pytest.raises(
+            UlduarError,
+            match=f"^Artifact {record_id} was deleted from the archive; put it again under a new record id$",
+        ):
+            session.put_file(path, "report", retention_class="short", record_id=record_id)
+        with pytest.raises(UnknownRecordError, match="is not in the archive"):
+            session.get_stream(artifact, open(os.devnull, "wb"))
+        again = session.put_file(path, "report", retention_class="short")  # a new record id archives it again
+        session.get_stream(again, open(os.devnull, "wb"))
+    assert count(archivum, "SELECT count(*) FROM ulduar.archive_registration") == 2
+
+
+def test_retention_skips_an_object_with_an_open_intent_of_another_cause_and_records_nothing(
+    config: Config, archivum: Archivum, tmp_path: Path
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+    deletion_id = _ids.uuid7()
+    with archivum.superuser() as su:
+        su.execute(
+            "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes,"
+            " stage, cause) SELECT project_id, %s, %s, 'default', %s, 3, 'intent', 'incomplete_put'"
+            " FROM ulduar.project WHERE name = 'alpha'",
+            (deletion_id, _ids.uuid7_time(deletion_id), due.checksum),
+        )
+    run = apply_retention(config, dry_run=False)
+    [outcome] = run.outcomes
+    assert [d.checksum for d in run.due] == [due.checksum]
+    assert (outcome.stage, outcome.deletion_id) == ("skipped", None)
+    assert outcome.detail == "an open incomplete_put deletion is pending"
+    assert [(row[0], row[1], row[3]) for row in deletion_rows(archivum)] == [(deletion_id, "intent", "incomplete_put")]
+    assert store_of(config).head(object_key_of(due)) is not None
+
+
 # --- secrets ---
 
 
 def test_no_credential_appears_in_the_log_records_of_a_real_run(
-    config: Config, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    config: Config, archivum: Archivum, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     assert config.archive is not None
     names = [config.archivum.dsn_env, config.archivum.ledger_dsn_env]
@@ -1064,7 +1280,7 @@ def test_no_credential_appears_in_the_log_records_of_a_real_run(
     secrets = [os.environ[name] for name in names if name]
     secrets += [conninfo_to_dict(dsn)["password"] for dsn in secrets[:2]]  # the connection strings come first
     assert all(secrets)
-    put(config, tmp_path, b"due", days=OLD)
+    put(archivum, config, tmp_path, b"due", days=OLD)
     caplog.set_level(logging.DEBUG, logger="ulduar")
     declare(config, "short", 30)
     apply_retention(config)
@@ -1085,7 +1301,7 @@ def test_a_record_that_cannot_be_written_after_the_commit_is_only_logged(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    due = put(config, tmp_path, b"due", days=OLD)
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
     declare(config, "short", 30)
     writes = threading.Event()
 
@@ -1098,7 +1314,7 @@ def test_a_record_that_cannot_be_written_after_the_commit_is_only_logged(
             return super().put_bytes_new(key, data)
 
     monkeypatch.setattr(
-        retention_module,
+        store_module,
         "open_store",
         lambda settings, *, deleting=False: FailingRecords(open_store(settings, deleting=deleting)),
     )

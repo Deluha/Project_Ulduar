@@ -21,7 +21,7 @@ from ulduar.freya import Artifact, Catalog, Connection, Redaction, RetentionActi
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._layout import DeletionRecord, HistoryRetentionRecord, MaintenanceRecord, RedactionRecord
 from ulduar.hodir._records import Rebuild
-from ulduar.hodir._registration import adopt_manifest, unregistered_manifests
+from ulduar.hodir._registration import adopt_all, unregistered_manifests
 from ulduar.hodir._store import WritingStore, read_small
 
 logger = logging.getLogger(__name__)
@@ -30,11 +30,11 @@ logger = logging.getLogger(__name__)
 def rebuild(catalog: Catalog, store: WritingStore, since: datetime | None) -> Rebuild:
     """Restore the deletion records the Archivum lacks, then adopt every manifest without a registration.
 
-    Only the records and manifests of the months from *since* on are read (all of them for None). A manifest whose
-    object is gone is left. Running it again changes nothing. `UnknownRecordError` for a deletion record of a scope
-    the project lacks (onboard it first); `UlduarError` for an outcome whose intent neither the Archivum nor the
-    records read hold (read from an earlier month); `ArchiveFormatError` for a record or manifest that cannot be
-    read, before anything is changed by it.
+    The `_records` and `_manifests` prefixes are listed whole; only those of the months from *since* on are decoded
+    (all of them for None). A manifest whose object is gone is left. Running it again changes nothing.
+    `UnknownRecordError` for a deletion record of a scope the project lacks (onboard it first); `UlduarError` for an
+    outcome whose intent neither the Archivum nor the records read hold (read from an earlier month);
+    `ArchiveFormatError` for a record or manifest that cannot be read, before anything is changed by it.
     """
     records = _read_records(catalog, store, since)
     deletions = [record for record in records if isinstance(record, DeletionRecord)]
@@ -45,12 +45,10 @@ def rebuild(catalog: Catalog, store: WritingStore, since: datetime | None) -> Re
         "Reading the scopes of the project", lambda tx: _archivum.project_scopes(tx, catalog.project.project_id)
     )
     for scope in scopes:
-        for manifest in (listed.manifest for listed in unregistered_manifests(catalog, store, scope, since=since)):
-            artifact = adopt_manifest(catalog, store, manifest)
-            if artifact is None:
-                continue
-            adopted.append(artifact)
-            datasets_missing += manifest.dataset_id is not None and artifact.dataset_id is None
+        manifests = (listed.manifest for listed in unregistered_manifests(catalog, store, scope, since=since))
+        found, missing = adopt_all(catalog, store, manifests)
+        adopted += found
+        datasets_missing += missing
     removals = tuple(_removal(record) for record in records if not isinstance(record, DeletionRecord))
     logger.info(
         "rebuilt: %d deletion records restored, %d artifacts adopted, %d without their dataset, %d removals found",

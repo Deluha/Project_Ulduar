@@ -3,8 +3,9 @@
 Input: nothing; these are plain values. Output: `Finding`, `Verification`, `Reconciliation` and the outcome
 vocabulary `CHECK_OUTCOMES`, which equals the list the Archivum's `archive_finding` table accepts (a test holds the
 two equal); `ArchiveRetentionRule`, `DueAddress`, `OpenIntent`, `DeletionOutcome` and `RetentionRun`; `Orphan`,
-`Adoption` and `CleanupRun` (the built-in incomplete-put rule); `Rebuild`; and the two rows retention reads,
-`LiveRegistration` and `LatestRule`. Private module; the facade `ulduar.hodir` re-exports the public records.
+`Adoption`, `UnfinishedUpload` and `CleanupRun` (the built-in incomplete-put rule); `Rebuild`; and the two rows
+retention reads, `LiveRegistration` and `LatestRule`. Private module; the facade `ulduar.hodir` re-exports the
+public records.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from typing import Literal, NamedTuple
 from uuid import UUID
 
 from ulduar.freya import Artifact, Redaction, RetentionAction
-from ulduar.hodir._store import UnfinishedUpload
 
 Stage = Literal["confirmed", "cancelled", "open", "skipped"]
 PASSED = "passed"
@@ -105,13 +105,12 @@ class LatestRule(NamedTuple):
 
 
 class LiveRegistration(NamedTuple):
-    """One registration whose artifact is still archived, with what retention needs of the artifact."""
+    """One registration whose artifact is still archived; *recorded_at* is the database's clock, retention's age."""
 
     scope: str
     checksum: bytes
     size: int
     artifact_id: UUID
-    artifact_event_at: datetime
     dataset_id: UUID | None
     retention_class: str | None
     recorded_at: datetime
@@ -192,6 +191,14 @@ class Adoption:
     scope: str
     checksum: bytes
     size: int
+
+
+@dataclass(frozen=True, slots=True)
+class UnfinishedUpload:
+    """What an interrupted put left behind: *key* names the object it was storing, *started* is when it began."""
+
+    key: str
+    started: datetime
 
 
 @dataclass(frozen=True, slots=True)

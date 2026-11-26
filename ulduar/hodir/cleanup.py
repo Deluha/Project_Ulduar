@@ -19,16 +19,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from ulduar.config import Config, check_name
-from ulduar.errors import ConfigurationError
-from ulduar.freya import Artifact, Catalog, Connection, Project, open_catalog
+from ulduar.freya import Catalog, Connection, Project, open_catalog
 from ulduar.hodir import _archivum, _layout
 from ulduar.hodir._deletion import delete_address
 from ulduar.hodir._reconcile import scan
-from ulduar.hodir._records import Adoption, CleanupRun, DeletionOutcome, Orphan
-from ulduar.hodir._registration import adopt_manifest, unregistered_manifests
-from ulduar.hodir._store import DeletingStore, UnfinishedUpload, WritingStore, open_store
+from ulduar.hodir._records import Adoption, CleanupRun, DeletionOutcome, Orphan, UnfinishedUpload
+from ulduar.hodir._registration import adopt_all, unregistered_manifests
+from ulduar.hodir._store import DeletingStore, PendingUpload, WritingStore, open_maintenance_store
 from ulduar.hodir._sync import sync_records
-from ulduar.hodir.archive import _ensure_format
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +39,7 @@ class _Plan:
 
     manifests: tuple[_layout.Manifest, ...]
     remove: tuple[Orphan, ...]
-    abort: tuple[UnfinishedUpload, ...]
+    abort: tuple[PendingUpload, ...]
     open_intents: tuple[Orphan, ...]
 
 
@@ -69,17 +67,12 @@ def _plan(catalog: Catalog, store: WritingStore, grace_hours: int, scope: str) -
         and found.is_old(o.stored.modified)
     )
     abort = tuple(upload for upload in found.unfinished if found.is_old(upload.started))
+    wanted = {(orphan.scope, orphan.checksum) for orphan in remove}
     intents = catalog.transaction(
         f"Reading the open incomplete-put deletions of scope {scope}",
-        lambda tx: _archivum.open_intents(tx, project, scope, CAUSE),
+        lambda tx: _archivum.open_intents_outside(tx, project, scope, CAUSE, wanted),
     )
-    wanted = {(orphan.scope, orphan.checksum) for orphan in remove}
-    open_intents = {
-        (i.scope, i.checksum): Orphan(i.scope, i.checksum, i.size)
-        for i in intents
-        if (i.scope, i.checksum) not in wanted
-    }
-    return _Plan(adopt, remove, abort, tuple(open_intents.values()))
+    return _Plan(adopt, remove, abort, tuple(Orphan(i.scope, i.checksum, i.size) for i in intents))
 
 
 def clean_incomplete(config: Config, *, dry_run: bool = True, scope: str | None = None) -> CleanupRun:
@@ -90,21 +83,17 @@ def clean_incomplete(config: Config, *, dry_run: bool = True, scope: str | None 
     registered under the id of the manifest (one the catalog holds is used as it is, its origin kept) with the
     manifest's retention class, as a put registers it. An object older than the grace that no live registration
     and no manifest names is removed, with an intent and an outcome recorded and written to the store; an
-    unfinished upload older than the grace is aborted. A real run also settles the open incomplete-put intents of
-    the scopes (a failed run left them) through the same protocol. A dry run opens the writing store and changes
-    nothing in the archive; a real run needs the deleter credential. Records the Archivum holds that the store
-    lacks are copied to it either way. `ConfigurationError` without `[archive]` (or, for a real run, without the
-    deleter); `UnknownRecordError` for a *scope* the project lacks; `ValueError` for a bad *scope*;
-    `ArchiveFormatError` for a manifest that cannot be read.
+    unfinished upload older than the grace is aborted (this is the only call that aborts one: `reconcile` only
+    reports them). A real run also settles the open incomplete-put intents of the scopes (a failed run left them)
+    through the same protocol. A dry run opens the writing store and writes only what any call may write: the
+    format marker and `LAYOUT.txt` of a new store, and the records the Archivum holds that the store lacks (a real
+    run copies those too, also when a step of it raises); it adopts, removes and aborts nothing. `ConfigurationError`
+    without `[archive]` (or, for a real run, without the deleter); `UnknownRecordError` for a *scope* the project
+    lacks; `ValueError` for a bad *scope*; `ArchiveFormatError` for a manifest that cannot be read.
     """
-    settings = config.archive
-    if settings is None:
-        raise ConfigurationError("Configuration key `archive` is required to use the archive")
     if scope is not None:
         check_name(scope, "scope")
-    deleting = None if dry_run else open_store(settings, deleting=True)
-    store: WritingStore = deleting if deleting is not None else open_store(settings)
-    _ensure_format(store)
+    settings, store, deleting = open_maintenance_store(config, deleting=not dry_run)
     with open_catalog(config) as catalog:
         scopes = [scope] if scope is not None else _all_scopes(catalog)
         plans = {name: _plan(catalog, store, settings.incomplete_put_grace_hours, name) for name in scopes}
@@ -113,7 +102,7 @@ def clean_incomplete(config: Config, *, dry_run: bool = True, scope: str | None 
             dry_run,
             tuple(Adoption(m.artifact_id, m.scope, m.checksum, m.size) for m in manifests),
             tuple(o for plan in plans.values() for o in plan.remove),
-            tuple(u for plan in plans.values() for u in plan.abort),
+            tuple(UnfinishedUpload(u.key, u.started) for plan in plans.values() for u in plan.abort),
             tuple(o for plan in plans.values() for o in plan.open_intents),
         )
         if deleting is None:
@@ -126,8 +115,11 @@ def clean_incomplete(config: Config, *, dry_run: bool = True, scope: str | None 
             )
             sync_records(catalog, store)
             return listing
-        result = _perform(catalog, deleting, settings.incomplete_put_grace_hours, listing, manifests)
-        sync_records(catalog, store)
+        uploads = [u for plan in plans.values() for u in plan.abort]
+        try:
+            result = _perform(catalog, deleting, settings.incomplete_put_grace_hours, listing, manifests, uploads)
+        finally:  # what the Archivum recorded before a step failed still reaches the store
+            sync_records(catalog, store)
     return result
 
 
@@ -137,30 +129,27 @@ def _all_scopes(catalog: Catalog) -> list[str]:
 
 
 def _perform(
-    catalog: Catalog, store: DeletingStore, grace_hours: int, listing: CleanupRun, manifests: list[_layout.Manifest]
+    catalog: Catalog,
+    store: DeletingStore,
+    grace_hours: int,
+    listing: CleanupRun,
+    manifests: list[_layout.Manifest],
+    uploads: list[PendingUpload],
 ) -> CleanupRun:
     """Adopt, settle and remove, then abort, in that order: an adopted object is never one of those removed."""
-    adopted: list[Artifact] = []
-    datasets_missing = 0
-    for manifest in manifests:
-        artifact = adopt_manifest(catalog, store, manifest)
-        if artifact is None:
-            logger.warning("manifest %s was not adopted: its object is gone", manifest.artifact_id)
-            continue
-        adopted.append(artifact)
-        datasets_missing += manifest.dataset_id is not None and artifact.dataset_id is None
+    adopted, datasets_missing = adopt_all(catalog, store, manifests)
     outcomes = [
         _remove(catalog, store, grace_hours, orphan)
         for orphan in (*listing.open_intents, *listing.remove)  # intents a failed run left open come first
     ]
-    for upload in listing.abort:
+    for upload in uploads:
         store.abort_unfinished(upload)
     logger.info(
         "incomplete-put rule applied: %d adopted, %d deletions (%s), %d uploads aborted",
         len(adopted),
         len(outcomes),
         ", ".join(sorted({outcome.stage for outcome in outcomes})) or "none",
-        len(listing.abort),
+        len(uploads),
     )
     return CleanupRun(
         False,

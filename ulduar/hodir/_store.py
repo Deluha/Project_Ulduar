@@ -1,10 +1,12 @@
 """The archive's storage interface: what Hodir needs from a store, one key validator, and the choice of backend.
 
 Input: an `ArchiveSettings`. Output: a `WritingStore` (put, head, read, list, abort an unfinished upload) or a
-`DeletingStore` (adds the two deletion calls). The writing classes have no delete method at all, so the
-credential that writes cannot delete, in the type system as well as in the permissions (hard rule 5). Two backends
-implement it: a local directory (`_directory`) and an S3-compatible bucket (`_s3`). Private: Hodir's facade
-imports it, a consumer never does. No message built here carries a credential's value (hard rule 11).
+`DeletingStore` (adds the two deletion calls), and `open_maintenance_store`, the preamble every call that opens the
+archive shares: `[archive]` required, the store opened, the format marker written on first use and checked. The
+writing classes have no delete method at all, so the credential that writes cannot delete, in the type system as
+well as in the permissions (hard rule 5). Two backends implement it: a local directory (`_directory`) and an
+S3-compatible bucket (`_s3`). Private: Hodir's facade imports it, a consumer never does. No message built here
+carries a credential's value (hard rule 11).
 """
 
 from __future__ import annotations
@@ -19,10 +21,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol, overload
+from typing import BinaryIO, Literal, NamedTuple, Protocol, overload
 
-from ulduar.config import ArchiveSettings
+from ulduar.config import ArchiveSettings, Config
 from ulduar.errors import ConfigurationError
+from ulduar.hodir import _layout
 
 MIB = 1024**2
 # An object this size or larger is stored in parts; a part is never smaller than the minimum.
@@ -48,8 +51,11 @@ class StoredObject:
 
 
 @dataclass(frozen=True, slots=True)
-class UnfinishedUpload:
-    """What an interrupted put left behind: S3 an unfinished multipart upload, a directory its temporary file."""
+class PendingUpload:
+    """What an interrupted put left behind, as the store reports it and needs it to abort it.
+
+    S3 an unfinished multipart upload (with its upload id), a directory its temporary file (an empty id).
+    """
 
     key: str
     upload_id: str
@@ -83,11 +89,11 @@ class WritingStore(Protocol):
         """Every object whose key starts with *prefix* and `/` (all of them for ""), recursively, sorted by key."""
         ...
 
-    def list_unfinished(self, prefix: str) -> Iterator[UnfinishedUpload]:
+    def list_unfinished(self, prefix: str) -> Iterator[PendingUpload]:
         """Every unfinished upload under *prefix*."""
         ...
 
-    def abort_unfinished(self, upload: UnfinishedUpload) -> None:
+    def abort_unfinished(self, upload: PendingUpload) -> None:
         """Remove what one interrupted put left behind; an upload already gone is not an error."""
         ...
 
@@ -183,3 +189,37 @@ def open_store(settings: ArchiveSettings, *, deleting: bool = False) -> WritingS
     except ImportError as e:
         raise ConfigurationError("The s3 backend needs the extra project-ulduar[s3] (boto3)") from e
     return open_s3_store(settings, deleting=deleting)
+
+
+def ensure_format(store: WritingStore) -> None:
+    """Write the format marker and the layout text on first use, then check the marker the store holds."""
+    if store.head(_layout.FORMAT_MARKER_KEY) is None:
+        store.put_bytes_new(_layout.FORMAT_MARKER_KEY, _layout.marker_bytes())
+        store.put_bytes_new(_layout.LAYOUT_KEY, _layout.LAYOUT_TEXT.encode("utf-8"))
+    _layout.check_marker(read_small(store, _layout.FORMAT_MARKER_KEY))
+
+
+class MaintenanceStore(NamedTuple):
+    """The archive a maintenance call works on: its settings, the store to write with, the deleting store if any."""
+
+    settings: ArchiveSettings
+    store: WritingStore
+    deleting: DeletingStore | None
+
+
+def open_maintenance_store(config: Config, *, deleting: bool = False) -> MaintenanceStore:
+    """Open the archive of `[archive]`, the deleting store when *deleting*, and check its format marker.
+
+    `ConfigurationError` without an `[archive]` section (or, for a deleting store of s3, without the deleter);
+    `ArchiveFormatError` when the marker is foreign or of another version. A new store gets its marker and layout text.
+    """
+    settings = config.archive
+    if settings is None:
+        raise ConfigurationError("Configuration key `archive` is required to use the archive")
+    if deleting:
+        deleting_store = open_store(settings, deleting=True)
+        ensure_format(deleting_store)
+        return MaintenanceStore(settings, deleting_store, deleting_store)
+    store = open_store(settings)
+    ensure_format(store)
+    return MaintenanceStore(settings, store, None)
