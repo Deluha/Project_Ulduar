@@ -4,6 +4,27 @@ What shipped, newest first. What is planned: `ROADMAP.md`.
 
 ## v0.1.0 — in development
 
+### Phase 1 — Freya
+
+The catalog and lineage, and the Archivum they live in (`ulduar/README.md`, `ulduar/freya/README.md`):
+
+- Configuration: one TOML file (`ulduar.toml`) read by `ulduar.config`.
+- Connection contract: PostgreSQL 18 only, TLS verification for a non-loopback host, time limits on every call.
+- Public exceptions for configuration, connection, schema-version and ledger failures.
+- Schema ledger: `freya.install` and `schema_status`; step 1 creates roles, tables, functions, partitions,
+  row-level security and grants.
+- Catalog: `open_catalog`, datasets and artifacts, with idempotent record ids.
+- Lineage: edges, ancestors and descendants, with a cycle guard.
+- Onboarding, history retention and redaction: `onboard_project`, `declare_history_retention`,
+  `apply_history_retention`, `redact`.
+- Isolation between projects and append-only history are enforced by the database, not by the library.
+- The first runtime dependency: `psycopg>=3.2,<4`, with the `binary` extra.
+- Packaging check, Python 3.11–3.15 CI matrix, branch-coverage floor, dev-tool lock, digest-pinned images,
+  weekly scan and a threat model.
+
+Upgrade notes: a consumer installs the Archivum with `freya.install` as the ledger role (see
+`ulduar/freya/README.md`).
+
 ### Phase 0 — Development process
 
 No product code. The development process of this repository:

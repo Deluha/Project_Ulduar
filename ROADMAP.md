@@ -6,8 +6,8 @@ decisions are dated.
 
 Approved by the owner on 2026-11-22: the concept, the form, the process timing and every scope rule
 below (D1–D14). What is still marked *proposed* inside a phase is that phase's starting position,
-presented as a concrete proposal and confirmed at its sign-off. Phase 0 is merged; no product code is
-built yet.
+presented as a concrete proposal and confirmed at its sign-off. Phase 0 is merged; Phase 1 is in
+review.
 
 Decided by the owner on 2026-11-23, in the planning session for the first personal-data consumers and in
 the review of the pull request that followed: decisions D15–D26 and the personal-data release they add,
@@ -239,7 +239,7 @@ D27–D32 and D35–D40 shape the Archivum schema and the object layout from the
 | Phase | Release | Status | Pull request |
 |---|---|---|---|
 | 0 — Development process | v0.1 | Merged | |
-| 1 — Freya | v0.1 | Not started | |
+| 1 — Freya | v0.1 | In review | |
 | 2 — Hodir | v0.1 | Not started | |
 | 3 — Mimiron | v0.1 | Not started | |
 | 4 — Thorim | v0.1 | Not started | |

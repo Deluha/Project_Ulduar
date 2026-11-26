@@ -60,8 +60,9 @@ Enforced: C4.
   declared and the recorded redaction, which the ledger role alone runs (D40); the recording roles cannot
   (D30). No migration of the Archivum rewrites existing rows.
 
-Enforced: review until the stores exist; Phases 1 and 2 add tests that the Archivum and the storage
-interface refuse both.
+Enforced: for the Archivum by the database (privileges, forced row-level security, append-only triggers),
+tested in `tests/test_freya_catalog.py` and `tests/test_freya_history.py`; the storage interface's tests
+arrive in Phase 2.
 
 ## R6 read-only towards consumers
 
@@ -78,6 +79,9 @@ The Archivum's tables, views and functions are created and changed by steps reco
 versioned-SQL ledger. No ad-hoc DDL in application code, no schema created as a side effect of an
 unrelated call. The ledger's own table is created by the ledger's bootstrap, the one statement outside a
 step.
+Time partitions of history tables are created and dropped only by functions a ledger step defines
+(`ulduar.ensure_partitions`, `ulduar.drop_empty_partitions`); the step defines the shape, the function only
+instantiates it — that is not ad-hoc DDL.
 Workflow: `references/workflows/changing-own-schema.md`.
 
 Enforced: review, plus the workflow's test checklist.

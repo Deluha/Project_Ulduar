@@ -44,7 +44,7 @@ and no doc describes behaviour that is not built.
 
 | Store | Holds | Technology | Contract |
 |---|---|---|---|
-| The Archivum | Catalog, lineage, runs, measurements, verdicts | PostgreSQL 18; its schema installed through Ulduar's own versioned-SQL ledger (R7) | Append-only history (R5) |
+| The Archivum | Catalog, lineage, runs, measurements, verdicts | PostgreSQL 18; schema `ulduar` in its own database (`ulduar/freya/`), installed through Ulduar's own versioned-SQL ledger (R7) | Append-only history (R5) |
 | The archive | Raw files, database dumps, reports, models | An S3-compatible bucket or a local directory behind one storage interface | Immutable, content-addressed objects (R5) |
 
 Both are provided by the consumer; no credential to either is stored in the Archivum or the repository (R11).
@@ -54,6 +54,8 @@ Both are provided by the consumer; no credential to either is stored in the Arch
 - One distribution, `project-ulduar`; one import package, `ulduar`; the version is stated once, in
   `pyproject.toml`, and read at import.
 - `dev_tools/` and `tests/` are not packaged.
+- The one runtime dependency is `psycopg`; the `binary` extra bundles libpq. The Archivum's SQL steps ship as
+  package data.
 - Runtime dependencies are ask-first; the `dev` extra carries the tooling and the test suite's clients.
 
 ## Tech stack
