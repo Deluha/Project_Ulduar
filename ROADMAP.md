@@ -469,7 +469,7 @@ owner's call). Hodir has no client-side encryption (D34).
 Sign-off decisions (owner, 2026-11-26: H1–H22 confirmed as proposed, after a probe of the pinned object store
 showed that conditional `PutObject` and `CompleteMultipartUpload` are honoured, that a SHA-256 checksum header is
 enforced, that `CopyObject` ignores `If-None-Match` and overwrites, and that a bucket-policy condition on
-`s3:if-none-match` is refused; H23–H30 confirmed the same day):
+`s3:if-none-match` is refused; H23–H31 confirmed the same day):
 
 | # | Item | Decision |
 |---|---|---|
@@ -498,6 +498,7 @@ enforced, that `CopyObject` ignores `If-None-Match` and overwrites, and that a b
 | H28 | Rebuild in two steps | `Archive.rebuild` (recording role) re-registers artifacts from manifests and restores deletion records, and lists the redaction and history-retention records of the store; `freya.reapply_removals(config, records)` (ledger role) applies those the Archivum lacks under their original ids — one connection at a time. |
 | H29 | Surface confirmed after the phase review | `freya.redact(..., redaction_id=)` (H24's keyword, renamed: `record_id` names the redacted record); `Catalog.transaction(what, work, *, event_ats=())` takes a callable so it can retry on a missing partition; `freya.ledger_transaction`, the ledger-role counterpart; `ulduar.freya` exports `Connection`, `RetentionAction`, `ReapplyResult`; the `ulduar.hodir` facade exports its result records (`Reconciliation`, `Rebuild`, `OpenIntent`, `Adoption`, `Orphan`, `CleanupRun`, `UnfinishedUpload` among them); `[archive.writer]` / `[archive.deleter]` hold `access_key_env`, `secret_key_env` and an optional `session_token_env`; step 2 grants the recording group SELECT on `redaction` and `history_retention_action` (its own project's rows) and EXECUTE on `artifact_is_archived`, for the record sweep of H4. |
 | H30 | Shared rules below the components | The schema name and `qualified`, the artifact kinds, the history and redaction vocabularies and the validators both components use move to one private module below them, `ulduar._schema`, as `_db` and `_ids` sit; Hodir imports no Freya module outside the facade (R10). |
+| H31 | Amendments after the phase review | H10: `sample=N` takes the N objects whose last check of any outcome is oldest, never-checked first, so a failing object no longer holds the rotation. H12–H14: an object's age counts from its registration's `recorded_at` against the database's clock (a rebuild restarts it, erring towards keeping); `apply_retention` takes no `now`. H8: reconcile only reports unfinished uploads; `clean_incomplete` aborts them. |
 
 ### Phase 3 — Mimiron
 
