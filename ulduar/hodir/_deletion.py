@@ -121,6 +121,14 @@ def _settle(
     return _archivum.insert_outcome(tx, project, intent, "confirmed"), "confirmed", None
 
 
+def manifest_keys(tx: Connection, project: Project, scope: str, checksum: bytes) -> list[str]:
+    """The keys of the manifests of every registration of the object, live or not."""
+    return [
+        _layout.manifest_key(project.name, scope, artifact_id)
+        for artifact_id in _archivum.address_artifacts(tx, project.project_id, scope, checksum)
+    ]
+
+
 def _write_record(store: DeletingStore, project: Project, record: DeletionRecord) -> None:
     """Write the record of a committed outcome; the Archivum is the authority, so a failure is only logged."""
     try:

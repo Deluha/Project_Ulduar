@@ -7,12 +7,14 @@ restores a lost Archivum from the store (`rebuild`, a `Rebuild`). Retention is t
 `declare_retention` (ledger role) appends an `ArchiveRetentionRule` and `apply_retention` lists, or deletes, the
 objects whose every registration has expired (a `RetentionRun` of `DueAddress`es, `OpenIntent`s and
 `DeletionOutcome`s). `clean_incomplete` is the built-in rule for what an interrupted put left behind (a
-`CleanupRun`). The storage interface and its two backends (a local directory and an S3-compatible bucket, chosen by
+`CleanupRun`), and `purge` removes one object archived by mistake, with a recorded reason (a `DeletionOutcome`).
+The storage interface and its two backends (a local directory and an S3-compatible bucket, chosen by
 the `[archive]` section of the configuration), the object layout, Hodir's SQL and the deletion protocol are private.
 """
 
 from __future__ import annotations
 
+from ulduar.hodir._purge import purge
 from ulduar.hodir._records import (
     Adoption,
     ArchiveRetentionRule,
@@ -52,4 +54,5 @@ __all__ = [
     "clean_incomplete",
     "declare_retention",
     "open_archive",
+    "purge",
 ]

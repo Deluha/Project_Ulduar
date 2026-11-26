@@ -251,6 +251,7 @@ def test_the_facade_exports_exactly_the_session_surface() -> None:
         "clean_incomplete",
         "declare_retention",
         "open_archive",
+        "purge",
     ]
 
 

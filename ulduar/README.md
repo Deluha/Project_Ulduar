@@ -17,7 +17,7 @@ file or a stream.
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation (`translate`, `translated`, `translated_transaction`) |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
-| `hodir/` | Hodir's facade (`open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`: `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`; `declare_retention`, `apply_retention`, `clean_incomplete` and their records) and, private, the object layout, the storage interface with its directory and S3 backends (`hodir/README.md`) |
+| `hodir/` | Hodir's facade (`open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`: `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`; `declare_retention`, `apply_retention`, `clean_incomplete`, `purge` and their records) and, private, the object layout, the storage interface with its directory and S3 backends (`hodir/README.md`) |
 | `freya/` | Freya's facade, schema ledger, SQL steps (the catalog, then the archive's tables), catalog session with its `transaction` hook, lineage and the ledger-role history calls (`freya/README.md`) |
 
 ## How it works
@@ -89,7 +89,7 @@ file or a stream.
   descendants calls and the `transaction` hook, the onboarding, retention, redaction and `reapply_removals` calls, the
   `ledger_transaction` hook, and their records): `freya/README.md`. The public Hodir surface (`ulduar.hodir`:
   `open_archive`, `put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`, and on a `Config`
-  `declare_retention`, `apply_retention` and `clean_incomplete`, with their records): `hodir/README.md`.
+  `declare_retention`, `apply_retention`, `clean_incomplete` and `purge`, with their records): `hodir/README.md`.
 - Logging: library code logs through loggers under `ulduar.*`, adds no handler and never touches the root
   logger.
 

@@ -26,7 +26,7 @@ from ulduar.errors import ConfigurationError, UlduarError
 from ulduar.freya import Catalog, Connection, Project, ledger_transaction, open_catalog
 from ulduar.freya.history import lookup_project_id
 from ulduar.hodir import _archivum, _layout
-from ulduar.hodir._deletion import delete_address
+from ulduar.hodir._deletion import delete_address, manifest_keys
 from ulduar.hodir._records import (
     ArchiveRetentionRule,
     DeletionOutcome,
@@ -274,16 +274,8 @@ def _delete_one(
         cause="retention",
         rule_id=target.rule_id,
         still_due=lambda tx: _is_due(tx, project.project_id, scope, checksum, now),
-        manifests=lambda tx: _manifest_keys(tx, project, scope, checksum),
+        manifests=lambda tx: manifest_keys(tx, project, scope, checksum),
     )
-
-
-def _manifest_keys(tx: Connection, project: Project, scope: str, checksum: bytes) -> list[str]:
-    """The keys of the manifests of every registration of the object."""
-    return [
-        _layout.manifest_key(project.name, scope, artifact_id)
-        for artifact_id in _archivum.address_artifacts(tx, project.project_id, scope, checksum)
-    ]
 
 
 def _log_outcome(outcome: DeletionOutcome) -> None:

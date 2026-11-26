@@ -6,22 +6,23 @@ Hodir is the cold archive: immutable, content-addressed storage of files, databa
 (hard rule 5). The package holds the storage interface and its two backends (a bucket on an S3-compatible server and
 a local directory), the object layout, and the public surface so far: `open_archive` with `put_file`, `put_stream`,
 `get`, `get_stream`, `verify`, `reconcile` and `rebuild`, the retention calls `declare_retention` and
-`apply_retention`, and `clean_incomplete`, the built-in rule for what an interrupted put left behind. The purge call
-arrives in a later Phase 2 commit.
+`apply_retention`, `clean_incomplete`, the built-in rule for what an interrupted put left behind, and `purge`, the
+explicit removal of an object archived by mistake.
 
 ## Files & entry points
 
 | File | Holds |
 |---|---|
-| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`, `declare_retention`, `apply_retention`, `ArchiveRetentionRule`, `RetentionRun`, `DueAddress`, `OpenIntent`, `DeletionOutcome`, `clean_incomplete`, `CleanupRun`, `Adoption`, `Orphan`, `UnfinishedUpload` |
+| `__init__.py` | The facade: `open_archive`, `Archive`, `PutSink`, `Verification`, `Finding`, `Reconciliation`, `Rebuild`, `declare_retention`, `apply_retention`, `ArchiveRetentionRule`, `RetentionRun`, `DueAddress`, `OpenIntent`, `DeletionOutcome`, `clean_incomplete`, `CleanupRun`, `Adoption`, `Orphan`, `UnfinishedUpload`, `purge` |
 | `archive.py` | `open_archive`, `Archive` (`put_file`, `put_stream`, `get`, `get_stream`, `verify`, `reconcile`, `rebuild`) and `PutSink` |
 | `retention.py` | `declare_retention`, `apply_retention` and the pure `due_addresses` |
 | `cleanup.py` | `clean_incomplete`, the built-in incomplete-put rule (D38) |
+| `_purge.py` | `purge`, the explicit recorded removal of an object archived by mistake (D39) |
 | `_reconcile.py` | Private: `scan` (one scope's live addresses and store listing, with the database's clock and the grace cutoff) and `reconcile` |
 | `_rebuild.py` | Private: `rebuild`, the restore of deletion records and registrations from the store (D32, H28) |
 | `_registration.py` | Private: `register_object` (the one registration step a put, an adoption and a rebuild share), `unregistered_manifests`, `adopt_manifest` |
 | `_sync.py` | Private: `sync_records`, the record sweep |
-| `_deletion.py` | Private: `delete_address`, the one deletion protocol (retention now; the incomplete-put clean-up and the purge later) |
+| `_deletion.py` | Private: `delete_address`, the one deletion protocol (retention, the incomplete-put clean-up and the purge), and `manifest_keys` |
 | `_records.py` | Private: the records Hodir returns (`Finding`, `Verification`, `Reconciliation`, `ArchiveRetentionRule`, `DueAddress`, `OpenIntent`, `DeletionOutcome`, `RetentionRun`, `Orphan`, `Adoption`, `CleanupRun`, `Rebuild`, re-exported by the facade), the two rows retention reads, and `CHECK_OUTCOMES` |
 | `_layout.py` | Private: the one home of the object layout: the keys and their readers (`parse_object_key`, `parse_manifest_key`, `parse_record_key`), the format marker, the layout text, the `Manifest` and the three maintenance records (`DeletionRecord`, `RedactionRecord`, `HistoryRetentionRecord`, read by `decode_record`) |
 | `_archivum.py` | Private: Hodir's SQL, the locks, the registration insert, the archived check, the scope check, the check and retention reads and writes, the deletion rows, and the reads the sweep and a rebuild make (the three kinds of record, a dataset by id, the project's scopes) |
@@ -43,7 +44,7 @@ All keys are relative to the store's prefix (`[archive] prefix`), with `<project
 | `LAYOUT.txt` | A plain-text description of this layout, written once beside the marker |
 | `<project>/<scope>/_objects/sha256/<h[0:2]>/<h>` | The object: its bytes, named by the SHA-256 of those bytes in lower-case hex; written once, never overwritten |
 | `<project>/<scope>/_manifests/<yyyy>/<mm>/<artifact_id>.json` | One manifest per registration (month of the artifact id, UTC) |
-| `<project>/_records/<yyyy>/<mm>/<record_id>.json` | Maintenance records: a deletion's intent and its outcome, a redaction, a history-retention action (a purge joins them later) |
+| `<project>/_records/<yyyy>/<mm>/<record_id>.json` | Maintenance records: a deletion's intent and its outcome, a redaction, a history-retention action |
 
 A manifest is canonical JSON (sorted keys, no spaces, a trailing newline): `format` 1, `artifact_id`, `event_at`
 (ISO 8601 UTC with milliseconds and `Z`), `project`, `scope`, `kind`, `checksum` (`sha256:<hex>`), `size`,
@@ -249,6 +250,32 @@ A manifest's `kind` must be one of the artifact kinds.
   the artifacts registered (an adoption whose object vanished is logged and left out). A real run adopts first, then
   removes, then aborts, and ends, like a dry run, with the record sweep. `archive.max_deletions_per_run` does not apply.
 
+### Purge (`purge`)
+
+- `purge(config, *, scope, checksum, reason) -> DeletionOutcome` is the explicit removal of an object archived by
+  mistake (D39, H16): the one deletion nothing declared. It needs `[archive]` and the `deleter` credential
+  (`ConfigurationError`) and checks the format marker. `reason` is one of Freya's `REDACTION_REASONS`
+  (`personal_data`, `secret`, `recorded_by_mistake`) and is recorded on both rows; `ValueError` for a bad scope, a
+  checksum that is not 32 bytes or another reason, and `UnknownRecordError` for a scope the project lacks, all before
+  any store call.
+- The object must be known to the project: some registration of (scope, checksum) exists, live or not, or the store
+  holds the object (`UnknownRecordError` otherwise). It goes through the deletion protocol with cause `purge`, the
+  reason, no rule and a `still_due` that is always true, so an intent is committed and written to the store, and
+  under the address lock every version of the object and the manifest of every registration of it (live or not,
+  however many artifacts share the content) are deleted and `confirmed` is recorded. A registration recorded after the
+  intent (a put of the same content) cancels the purge and the object stays; purge again to remove it.
+- What it removes: the object, its versions and its manifests. What it leaves: the catalog's entries (artifact,
+  registration, lineage; all append-only), which keep naming the removed object (`get` says it is not in the archive,
+  and a reconciliation does not report it, because the confirmed deletion explains it). A consumer redacts what they
+  hold separately with `freya.redact`.
+- An object already gone (every registration followed by a confirmed deletion, nothing in the store, no open intent)
+  is `skipped` with a detail saying so, and nothing is recorded. A refused delete (the writer credential, an object
+  lock) leaves the intent open (stage `open`); purging again resumes it, and its reason is the original intent's: another
+  `reason`, or an open intent of another cause for the object, is `UlduarError` before anything changes, so a record
+  never claims a reason or a cause it was not given.
+- One `info` line (`ulduar.hodir._purge`: first 12 hex digits of the checksum, scope, reason, stage), never a name or
+  content; the call ends with the record sweep.
+
 ### Rebuild
 
 - `rebuild(*, since=None) -> Rebuild` rebuilds a lost Archivum from the store alone, as the recording role with the
@@ -276,14 +303,14 @@ A manifest's `kind` must be one of the artifact kinds.
 - `_sync.sync_records(catalog, store) -> int` lists `<project>/_records` once and writes, with `put_bytes_new`, every
   deletion, redaction and history-retention action of the project whose key is absent; it returns how many it wrote.
   `verify`, `reconcile`, `clean_incomplete` and `apply_retention` (a dry run too: writing records needs only the
-  writer) end with it, and a later purge will. The Archivum is the authority and the store its copy (D32), so the
+  writer) and `purge` end with it. The Archivum is the authority and the store its copy (D32), so the
   sweep never fails a call: a store or Archivum error (`UlduarError`) is logged as a `warning`
   (`ulduar.hodir._sync`) and the call's own result stands; the next call catches up. The recording role reads the
   two Freya tables through the grants of step 2.
 
 ### The deletion protocol (`_deletion.delete_address`)
 
-One home for every deletion (retention now; the incomplete-put clean-up and the purge reuse it), so a put and a
+One home for every deletion (retention, the incomplete-put clean-up and the purge use it), so a put and a
 deletion of one object are ordered the same way whatever the cause (D37). Both transactions run on the catalog
 session's connection (`Catalog.transaction`, the recording role); the credential that deletes is the store's.
 

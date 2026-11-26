@@ -98,7 +98,8 @@ def check_kind(kind: str) -> None:
         raise ValueError(f"Artifact kind {kind!r} is not one of {', '.join(ARTIFACT_KINDS)}")
 
 
-def _check_checksum(checksum: bytes) -> None:
+def check_checksum(checksum: bytes) -> None:
+    """`ValueError` unless *checksum* is a SHA-256 digest of `CHECKSUM_BYTES` bytes."""
     if not isinstance(checksum, bytes) or len(checksum) != CHECKSUM_BYTES:
         found = f"{len(checksum)} bytes" if isinstance(checksum, bytes) else f"a {type(checksum).__name__}"
         raise ValueError(f"The checksum must be a SHA-256 digest of {CHECKSUM_BYTES} bytes, got {found}")
@@ -111,7 +112,7 @@ def check_origin(origin: str | None) -> None:
 
 def _check_artifact(kind: str, checksum: bytes, size: int, origin: str | None) -> None:
     check_kind(kind)
-    _check_checksum(checksum)
+    check_checksum(checksum)
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
         raise ValueError(f"The size {size!r} must be a non-negative integer")
     check_origin(origin)
@@ -255,7 +256,7 @@ class Catalog:
         if kind is not None:
             check_kind(kind)
         if checksum is not None:
-            _check_checksum(checksum)
+            check_checksum(checksum)
         filters = {
             "scope": self._scope(scope),
             "checksum": checksum,
