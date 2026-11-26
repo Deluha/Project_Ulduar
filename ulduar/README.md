@@ -15,7 +15,7 @@ public exceptions, the record identifiers and the first component, Freya (`freya
 | `errors.py` | The public exceptions, one module: `UlduarError` and its subclasses |
 | `_db.py` | Private: the one connection and transaction helper, the transport guard, the error translation |
 | `_ids.py` | Private: the only record-id generator, UUIDv7 (`uuid7`, `uuid7_time`) |
-| `freya/` | Freya's facade, schema ledger and SQL steps |
+| `freya/` | Freya's facade, schema ledger, SQL steps, catalog session and the ledger-role history calls (`freya/README.md`) |
 
 ## How it works
 
@@ -26,12 +26,14 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   `ConfigurationError` naming the dotted key or the path.
 - Credentials never appear in the file: `dsn_env` and `ledger_dsn_env` name environment variables that hold
   PostgreSQL connection strings. `dsn_env` is the recording role's; `ledger_dsn_env` is the ledger role's,
-  used only to install and upgrade the schema (and, in later commits, onboarding, retention and redaction).
+  used only to install and upgrade the schema, onboard a project and declare, apply and redact history.
 - `_db.open_connection` reads the variable, refuses a non-loopback host unless `sslmode` is `verify-full`
-  or `verify-ca`, opens one connection (no pool, no prepared statements) and refuses a server that is not
+  or `verify-ca` (reading what libpq falls back to when the string leaves it out: `PGHOST`, `PGHOSTADDR`,
+  `PGSSLMODE`; a connection service, in the string or through `PGSERVICE` / `PGSERVICEFILE`, is refused), opens one connection (no pool, no prepared statements) and refuses a server that is not
   PostgreSQL 18. `_db.transaction` wraps one transaction and sets `statement_timeout`, `lock_timeout` and
   `transaction_timeout` for it alone (`set_config(..., true)`), so the limits survive a connection pooler.
-  `_db.translate` turns a driver error into a package exception by SQLSTATE.
+  `_db.translate` turns a driver error into a package exception by SQLSTATE; `_db.translated(what)` does it for
+  a block.
 - Time limits, in seconds (default, range): connect 10 (1–60), statement 30 (1–600), lock 5 (1–60), total
   budget per call 60 (1–3600). A limit that is hit raises `ArchivumUnavailable`.
 - Record ids are UUIDv7 made by the client; a record's `event_at` is the time inside its id.
@@ -51,6 +53,8 @@ public exceptions, the record identifiers and the first component, Freya (`freya
   credential's value.
 - One runtime dependency: `psycopg>=3.2,<4` (needs a system libpq 16 or newer; the extra
   `project-ulduar[binary]` brings a bundled one). Adding another is an ask-first decision.
+- The public Freya surface (`ulduar.freya`: `open_catalog`, the onboarding, retention and redaction calls and
+  their records): `freya/README.md`.
 - Logging: library code logs through loggers under `ulduar.*`, adds no handler and never touches the root
   logger.
 

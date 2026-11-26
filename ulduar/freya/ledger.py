@@ -23,7 +23,7 @@ from psycopg.rows import TupleRow
 import ulduar
 from ulduar import _db
 from ulduar.config import Config
-from ulduar.errors import ConfigurationError, LedgerError, SchemaVersionError, UlduarError
+from ulduar.errors import ConfigurationError, LedgerError, SchemaVersionError
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,14 @@ def _read_status(conn: psycopg.Connection[TupleRow], steps: tuple[Step, ...]) ->
     return _status(applied, steps, _assess(applied, steps))
 
 
+def open_ledger_connection(config: Config, purpose: str) -> psycopg.Connection[TupleRow]:
+    """Open a connection as the ledger role; `ConfigurationError` naming *purpose* when no ledger variable is set."""
+    settings = config.archivum
+    if settings.ledger_dsn_env is None:
+        raise ConfigurationError(f"archivum.ledger_dsn_env is not set — {purpose} needs the ledger role")
+    return _db.open_connection(settings.ledger_dsn_env, settings)
+
+
 def install(config: Config, *, allow_breaking: bool = False, steps: tuple[Step, ...] | None = None) -> SchemaStatus:
     """Install or upgrade the Archivum's schema to this library's steps, as the ledger role.
 
@@ -289,18 +297,14 @@ def install(config: Config, *, allow_breaking: bool = False, steps: tuple[Step, 
     *steps* exists so a test can supply synthetic steps. Returns the status after the install.
     """
     settings = config.archivum
-    if settings.ledger_dsn_env is None:
-        raise ConfigurationError("archivum.ledger_dsn_env is not set — install needs the ledger role")
     steps = load_steps() if steps is None else steps
-    with _db.open_connection(settings.ledger_dsn_env, settings) as conn:
-        try:
-            with _db.transaction(conn, settings):
-                _install_in_transaction(conn, steps, allow_breaking)
-                return _read_status(conn, steps)
-        except UlduarError:
-            raise
-        except psycopg.Error as e:
-            raise _db.translate(e, "Installing the Archivum") from e
+    with (
+        open_ledger_connection(config, "install") as conn,
+        _db.translated("Installing the Archivum"),
+        _db.transaction(conn, settings),
+    ):
+        _install_in_transaction(conn, steps, allow_breaking)
+        return _read_status(conn, steps)
 
 
 def schema_status(config: Config) -> SchemaStatus:
@@ -311,13 +315,11 @@ def schema_status(config: Config) -> SchemaStatus:
     """
     settings = config.archivum
     steps = load_steps()
-    with _db.open_connection(settings.dsn_env, settings) as conn:
-        try:
-            with _db.transaction(conn, settings):
-                if not _ledger_installed(conn):
-                    raise SchemaVersionError("The Archivum is not installed — run freya.install")
-                return _read_status(conn, steps)
-        except UlduarError:
-            raise
-        except psycopg.Error as e:
-            raise _db.translate(e, "Reading the Archivum's schema status") from e
+    with (
+        _db.open_connection(settings.dsn_env, settings) as conn,
+        _db.translated("Reading the Archivum's schema status"),
+        _db.transaction(conn, settings),
+    ):
+        if not _ledger_installed(conn):
+            raise SchemaVersionError("The Archivum is not installed — run freya.install")
+        return _read_status(conn, steps)

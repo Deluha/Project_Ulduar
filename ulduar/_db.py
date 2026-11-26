@@ -58,17 +58,35 @@ def _parse(dsn: str, variable: str) -> dict[str, Any]:
         raise ConfigurationError(f"The connection string in {variable} is malformed") from e
 
 
-def _hosts(info: Mapping[str, Any]) -> list[str]:
-    """Every host and hostaddr entry (both may be comma-separated lists)."""
-    return [entry for key in ("host", "hostaddr") for entry in str(info.get(key) or "").split(",") if entry]
+# DSN key -> the environment variable libpq falls back to when the DSN leaves the key out.
+_HOST_FALLBACKS = (("host", "PGHOST"), ("hostaddr", "PGHOSTADDR"))
+_SERVICE_VARIABLES = ("PGSERVICE", "PGSERVICEFILE")
 
 
-def check_transport(dsn: str, variable: str = "the connection string") -> None:
-    """Refuse a non-loopback, non-socket host unless TLS verifies the server (sslmode verify-full or verify-ca)."""
+def _hosts(info: Mapping[str, Any], environ: Mapping[str, str]) -> list[str]:
+    """Every host and hostaddr entry libpq will use (each may be a comma-separated list), env fallback included."""
+    return [
+        entry
+        for key, variable in _HOST_FALLBACKS
+        for entry in str(info.get(key) or environ.get(variable) or "").split(",")
+        if entry
+    ]
+
+
+def check_transport(dsn: str, variable: str = "the connection string", environ: Mapping[str, str] = os.environ) -> None:
+    """Refuse a non-loopback, non-socket host unless TLS verifies the server (sslmode verify-full or verify-ca).
+
+    libpq fills what the DSN leaves out from *environ* (`PGHOST`, `PGHOSTADDR`, `PGSSLMODE`, `PGSERVICE`), so
+    the check reads the same fallbacks, and a connection service, whose target is not visible here, is
+    refused. A DSN and environment that name no host reach the local Unix socket, which is accepted.
+    """
     info = _parse(dsn, variable)
-    for host in _hosts(info):
+    if info.get("service") or any(environ.get(name) for name in _SERVICE_VARIABLES):
+        raise ConfigurationError("A connection service is not supported — name the host in the connection string")
+    sslmode = info.get("sslmode") or environ.get("PGSSLMODE")
+    for host in _hosts(info, environ):
         local = host in LOOPBACK_HOSTS or host.startswith("/")
-        if not local and info.get("sslmode") not in SECURE_SSLMODES:
+        if not local and sslmode not in SECURE_SSLMODES:
             raise ConfigurationError(
                 f"Archivum host {host} is not on this machine — "
                 "a non-loopback Archivum needs sslmode verify-full or verify-ca"
@@ -76,7 +94,7 @@ def check_transport(dsn: str, variable: str = "the connection string") -> None:
 
 
 def _first_host(info: Mapping[str, Any]) -> str:
-    return next(iter(_hosts(info)), "the default host")
+    return next(iter(_hosts(info, os.environ)), "the default host")
 
 
 def open_connection(variable: str, settings: ArchivumSettings) -> psycopg.Connection[TupleRow]:
@@ -123,6 +141,15 @@ def transaction(
             ),
         )
         yield conn
+
+
+@contextmanager
+def translated(what: str) -> Iterator[None]:
+    """Re-raise a driver error raised inside as the package's exception (`translate`); package errors pass through."""
+    try:
+        yield
+    except psycopg.Error as e:
+        raise translate(e, what) from e
 
 
 def translate(error: psycopg.Error, what: str) -> UlduarError:

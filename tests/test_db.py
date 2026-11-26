@@ -47,13 +47,13 @@ REFUSED_DSNS = [
 
 @pytest.mark.parametrize("dsn", ALLOWED_DSNS)
 def test_check_transport_accepts_local_and_verified_hosts(dsn: str) -> None:
-    _db.check_transport(dsn)
+    _db.check_transport(dsn, environ={})
 
 
 @pytest.mark.parametrize(("dsn", "host"), REFUSED_DSNS)
 def test_check_transport_refuses_a_remote_host_without_verified_tls(dsn: str, host: str) -> None:
     with pytest.raises(ConfigurationError) as caught:
-        _db.check_transport(dsn)
+        _db.check_transport(dsn, environ={})
     assert host in str(caught.value)
     assert "verify-full or verify-ca" in str(caught.value)
 
@@ -61,15 +61,69 @@ def test_check_transport_refuses_a_remote_host_without_verified_tls(dsn: str, ho
 def test_check_transport_refuses_a_malformed_dsn_without_echoing_it() -> None:
     dsn = "host=db.example.test password=hunter2-secret =oops"
     with pytest.raises(ConfigurationError) as caught:
-        _db.check_transport(dsn, "ARCHIVUM_DSN")
+        _db.check_transport(dsn, "ARCHIVUM_DSN", {})
     assert "hunter2-secret" not in str(caught.value)
     assert "ARCHIVUM_DSN" in str(caught.value)
 
 
 def test_remote_refusal_never_names_the_password() -> None:
     with pytest.raises(ConfigurationError) as caught:
-        _db.check_transport("host=db.example.test password=hunter2-secret sslmode=require")
+        _db.check_transport("host=db.example.test password=hunter2-secret sslmode=require", environ={})
     assert "hunter2-secret" not in str(caught.value)
+
+
+SERVICE_REFUSAL = "A connection service is not supported"
+
+
+@pytest.mark.parametrize(
+    ("dsn", "environ"),
+    [
+        ("service=prod", {}),
+        ("host=localhost dbname=a service=prod", {}),
+        ("host=localhost dbname=a", {"PGSERVICE": "prod"}),
+        ("host=localhost dbname=a", {"PGSERVICEFILE": "/tmp/pg_service.conf"}),
+    ],
+)
+def test_check_transport_refuses_a_connection_service(dsn: str, environ: dict[str, str]) -> None:
+    with pytest.raises(ConfigurationError, match=SERVICE_REFUSAL):
+        _db.check_transport(dsn, environ=environ)
+
+
+@pytest.mark.parametrize(
+    ("dsn", "environ", "host"),
+    [
+        ("dbname=a", {"PGHOST": "db.example.test"}, "db.example.test"),
+        ("dbname=a", {"PGHOSTADDR": "192.0.2.7"}, "192.0.2.7"),
+        ("host=localhost dbname=a", {"PGHOSTADDR": "192.0.2.7"}, "192.0.2.7"),
+        ("dbname=a", {"PGHOST": "localhost,db.example.test"}, "db.example.test"),
+        ("dbname=a", {"PGHOST": "db.example.test", "PGSSLMODE": "require"}, "db.example.test"),
+        ("host=db.example.test dbname=a sslmode=disable", {"PGSSLMODE": "verify-full"}, "db.example.test"),
+    ],
+)
+def test_check_transport_reads_the_environment_libpq_falls_back_to(
+    dsn: str, environ: dict[str, str], host: str
+) -> None:
+    with pytest.raises(ConfigurationError) as caught:
+        _db.check_transport(dsn, environ=environ)
+    assert host in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("dsn", "environ"),
+    [
+        ("dbname=a", {}),  # no host anywhere: libpq uses the local Unix socket
+        ("dbname=a", {"PGHOST": "localhost"}),
+        ("dbname=a", {"PGHOST": "/var/run/postgresql"}),
+        ("dbname=a", {"PGHOST": "db.example.test", "PGSSLMODE": "verify-full"}),
+        ("dbname=a sslmode=verify-ca", {"PGHOST": "db.example.test", "PGSSLMODE": "disable"}),
+        ("host=db.example.test dbname=a", {"PGSSLMODE": "verify-ca"}),
+        ("host=localhost dbname=a", {"PGHOST": "db.example.test"}),  # the DSN's host wins over PGHOST
+    ],
+)
+def test_check_transport_accepts_what_the_environment_makes_local_or_verified(
+    dsn: str, environ: dict[str, str]
+) -> None:
+    _db.check_transport(dsn, environ=environ)
 
 
 def test_read_dsn_returns_the_value_and_names_a_missing_variable() -> None:
@@ -179,6 +233,18 @@ def test_translate_refusal_by_privileges_is_isolation(archivum: Archivum, tmp_pa
     error = _db.translate(caught.value, "Reading the catalog")
     assert isinstance(error, IsolationError)
     assert str(error).startswith("Reading the catalog failed: permission denied")
+
+
+def test_translated_wraps_a_driver_error_and_lets_a_package_error_through(db_conn: psycopg.Connection) -> None:
+    with pytest.raises(UlduarError, match="^Reading failed: division by zero$") as caught:
+        with _db.translated("Reading"):
+            db_conn.execute("SELECT 1/0")
+    assert isinstance(caught.value.__cause__, psycopg.Error)
+    db_conn.rollback()
+    with pytest.raises(SchemaVersionError, match="^as is$"), _db.translated("Reading"):
+        raise SchemaVersionError("as is")
+    with _db.translated("Reading"):
+        pass
 
 
 def raise_in_database(db_conn: psycopg.Connection, sqlstate: str) -> psycopg.Error:
