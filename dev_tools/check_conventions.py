@@ -1,4 +1,4 @@
-"""Mechanical convention checks C1–C9 for the hard rules of CLAUDE.md.
+"""Mechanical convention checks C1–C10 for the hard rules of CLAUDE.md.
 
 Each check is a pure function over (path, source) pairs or a file list, so the
 tests feed it synthetic input; main() wires the tracked files of the real
@@ -256,6 +256,44 @@ def check_cli_entry(sources: Iterable[Source]) -> list[str]:
     return out
 
 
+def _component_of(path: str) -> str | None:
+    """The component a package path sits in: `freya` for `ulduar/freya/catalog.py`; None for a top-level module
+    and for a private sub-package (`_`-prefixed)."""
+    parts = path.removeprefix(PACKAGE).split("/")
+    return parts[0] if len(parts) > 1 and not parts[0].startswith("_") else None
+
+
+def check_component_boundaries(sources: Iterable[Source]) -> list[str]:
+    """C10 (R10): a component is used through its facade only; its sub-modules and private names stay its own."""
+    package = list(_package_sources(sources))
+    components = {c for p, _ in package if (c := _component_of(p))}
+    out = []
+    for path, source in package:
+        own = _component_of(path)
+        tree = _parse(path, source)
+        if own is None or tree is None:
+            continue
+
+        def report(lineno: int, what: str, other: str, path: str = path) -> None:
+            out.append(f"{path}:{lineno}: C10 `{what}` reaches into component {other} outside its facade (R10)")
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                continue  # a relative import stays inside the component
+            for lineno, module in _imported_modules(node):
+                root, _, rest = module.partition(".")
+                other, _, inside = rest.partition(".")
+                if root != PACKAGE.rstrip("/") or other not in components - {own}:
+                    continue
+                if inside:
+                    report(lineno, module, other)  # a sub-module of another component
+                elif isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        if alias.name.startswith("_"):
+                            report(lineno, alias.name, other)  # a private name of its facade
+    return out
+
+
 def check_forbidden_tracked(files: Iterable[str]) -> list[str]:
     """C8 (R11): no secret or build artifact is tracked."""
     return [f"{path}: C8 secret or build artifact tracked" for path in files if FORBIDDEN_TRACKED_RE.search(path)]
@@ -293,6 +331,7 @@ def run_all(files: list[str], sources: list[Source]) -> list[str]:
         + check_module_docstrings(sources)
         + check_test_connections(sources)
         + check_cli_entry(sources)
+        + check_component_boundaries(sources)
         + check_forbidden_tracked(files)
         + check_test_skips(sources)
     )
@@ -326,7 +365,7 @@ def main() -> int:
             "checkers.md#checker-project-conventions for the rule table."
         )
         return 1
-    print("✅ conventions C1–C9 hold")
+    print("✅ conventions C1–C10 hold")
     return 0
 
 

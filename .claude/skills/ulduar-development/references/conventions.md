@@ -1,7 +1,7 @@
 # Conventions — the rulebook
 
 Full forms of the hard rules R1–R11 (short forms: `CLAUDE.md`), the simplicity audit, error handling, and
-SQL and archive patterns. Each rule names how it is enforced: a checker rule C1–C9
+SQL and archive patterns. Each rule names how it is enforced: a checker rule C1–C10
 (`references/checkers.md#checker-project-conventions`), a test, or review.
 
 ## R1 generic core, standalone
@@ -61,8 +61,9 @@ Enforced: C4.
   (D30). No migration of the Archivum rewrites existing rows.
 
 Enforced: for the Archivum by the database (privileges, forced row-level security, append-only triggers),
-tested in `tests/test_freya_catalog.py` and `tests/test_freya_history.py`; the storage interface's tests
-arrive in Phase 2.
+tested in `tests/test_freya_catalog.py` and `tests/test_freya_history.py`; for the archive store by the storage
+interface (the writing store has no delete call) and the deleter credential the store refuses to the writer, tested in
+`tests/test_hodir_store.py`, and the deletion protocol in `tests/test_hodir_retention.py` and `tests/test_hodir_purge.py`.
 
 ## R6 read-only towards consumers
 
@@ -124,7 +125,7 @@ facade that only re-exports, with an explicit public surface. Components call ea
 surface. The `mimiron` entry module parses the command line and holds command flow only; every
 behaviour it offers is a call into a component, so the library and the CLI can never diverge.
 
-Enforced: C7 (command-line parsing outside the entry module), review for the rest.
+Enforced: C7 (command-line parsing outside the entry module), C10 (an import of another component's internals), review for the rest.
 
 ## R11 no secrets stored or logged
 

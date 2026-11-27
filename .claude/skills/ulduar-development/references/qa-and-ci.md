@@ -14,7 +14,7 @@ pinned range-and-tree scan.
 | Hook id | Stage | Enforces | Runs locally when |
 |---|---|---|---|
 | `gitleaks` | pre-commit | Secret scan of the staged changes with `.gitleaks.toml` (`references/checkers.md#checker-secret-scan`) | any commit |
-| `project-conventions` | pre-commit | Checker rules C1–C9 (`dev_tools/check_conventions.py`), whole-repo scan | every commit |
+| `project-conventions` | pre-commit | Checker rules C1–C10 (`dev_tools/check_conventions.py`), whole-repo scan | every commit |
 | `ruff` | pre-commit | `E`, `F`, `B`, `I`, `UP` (config in `pyproject.toml`); isolated venv | any `.py` |
 | `guidance-integrity` | pre-commit | Doc pointers + anchors resolve, `CLAUDE.md` budget, skill routing, single-home tokens (`dev_tools/check_guidance_integrity.py`) | any `.py` / `.md` |
 | `docs-sync` | **commit-msg** | Code change in a documented area also touches its doc (`dev_tools/check_docs_sync.py --staged`) | every commit |
@@ -63,7 +63,7 @@ stated once, in `dev_tools/services.py`.
 | Cloud session | `.claude/hooks/session-start.sh` starts the Docker daemon, then `python dev_tools/services.py start` | exported from `services.py env`; verify falls back to the same local defaults |
 | Local clone | `python dev_tools/services.py start` (Docker) | `python dev_tools/services.py env`; verify falls back to the same local defaults |
 | CI | the same command, a step of `ci-tests.yml` | `services.py env` appended to `$GITHUB_ENV` |
-| Dev container | `db` and `s3` services in `.devcontainer/docker-compose.yml`; `app` and `s3` share the `db` network namespace | set in the compose file |
+| Dev container | `db` and `s3` services in `.devcontainer/docker-compose.yml`; `app` and `s3` share the `db` network namespace, as does the one-shot `s3-provision` service that provisions the writer and deleter users | set in the compose file |
 
 - CI names no image, port or credential of its own; `tests/test_services.py` fails when it stops calling
   the services command, when the dev container names another image, and when the PostgreSQL server is

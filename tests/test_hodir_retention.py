@@ -13,6 +13,7 @@ import itertools
 import logging
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -1232,6 +1233,25 @@ def test_an_archivum_whose_connection_is_lost_in_the_deletion_stops_the_run_with
     monkeypatch.setattr(store_module, "open_store", open_store)
     [resumed] = apply_retention(config, dry_run=False).outcomes
     assert resumed.stage == "confirmed" and store_of(config).head(object_key_of(due)) is None
+
+
+def test_a_slow_delete_past_the_call_budget_is_ended_by_the_servers_transaction_timeout_and_the_intent_resumes(
+    config: Config, archivum: Archivum, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    due = put(archivum, config, tmp_path, b"due", days=OLD)
+    declare(config, "short", 30)
+    budget_of_one_second = replace(config, archivum=replace(config.archivum, call_budget_s=1))
+    hook_store(monkeypatch, on_first_delete=lambda: time.sleep(2))  # past the budget, then the real delete
+    with pytest.raises(ArchivumUnavailable) as raised:
+        apply_retention(budget_of_one_second, dry_run=False)  # the server ends the session; the probe finds it gone
+    assert str(raised.value).startswith("Deleting object")  # the original error, not the probe's
+    assert stages(archivum) == ["intent"]  # no outcome: the intent stays open
+    [(intent_id, *_)] = deletion_rows(archivum)
+    monkeypatch.setattr(store_module, "open_store", open_store)
+    [resumed] = apply_retention(config, dry_run=False).outcomes
+    assert resumed.stage == "confirmed" and store_of(config).head(object_key_of(due)) is None
+    assert stages(archivum) == ["intent", "confirmed"]  # the same intent, confirmed: no second intent row
+    assert [row[2] for row in deletion_rows(archivum)][1] == intent_id  # the outcome belongs to the first intent
 
 
 def test_a_reconciliation_during_a_deletion_does_not_report_the_object_it_is_removing(
