@@ -5,7 +5,8 @@ keeping. `start [service …]` runs the containers (pulling an image when needed
 until each one answers; `stop` removes them; `status` says whether each is ready; `env`
 prints the test settings as KEY=VALUE lines (for $GITHUB_ENV, or `export` in a shell).
 Images, ports, credentials and the variable names the tests read are stated here and
-nowhere else. The credentials are throwaways for local instances that hold no data.
+nowhere else. The credentials are throwaways for local instances that hold no data. `start`
+also provisions the object store's two test users: a writer that cannot delete and a deleter.
 Exit 0 = done, 1 = a service could not be started or is not ready. Stdlib only.
 Details: tests/README.md.
 """
@@ -13,6 +14,7 @@ Details: tests/README.md.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -41,6 +43,24 @@ OBJECT_STORE_PORT = 59000
 OBJECT_STORE_ACCESS_KEY = "ulduar"
 OBJECT_STORE_SECRET_KEY = "ulduar-test-only"
 DEFAULT_S3_ENDPOINT = f"http://{HOST}:{OBJECT_STORE_PORT}"
+# The archive's two credentials (ROADMAP.md D35): the writer cannot delete, the deleter can. Both are limited to
+# buckets named like the tests' (`ulduar-test-*`).
+OBJECT_STORE_WRITER_ACCESS_KEY = "ulduar-writer"
+OBJECT_STORE_WRITER_SECRET_KEY = "ulduar-writer-test-only"
+OBJECT_STORE_DELETER_ACCESS_KEY = "ulduar-deleter"
+OBJECT_STORE_DELETER_SECRET_KEY = "ulduar-deleter-test-only"
+TEST_BUCKET_ARNS = ["arn:aws:s3:::ulduar-test-*", "arn:aws:s3:::ulduar-test-*/*"]
+WRITER_ACTIONS = [
+    "s3:PutObject",
+    "s3:GetObject",
+    "s3:ListBucket",
+    "s3:ListBucketMultipartUploads",
+    "s3:AbortMultipartUpload",
+    "s3:ListMultipartUploadParts",
+    "s3:GetBucketVersioning",
+    "s3:ListBucketVersions",
+]
+DELETER_ACTIONS = [*WRITER_ACTIONS, "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:GetObjectVersion"]
 # MinIO answers 200 here once it serves requests.
 OBJECT_STORE_READY_PATH = "/minio/health/ready"
 
@@ -49,6 +69,10 @@ DSN_VARIABLE = "ULDUAR_TEST_DSN"
 S3_ENDPOINT_VARIABLE = "ULDUAR_TEST_S3_ENDPOINT"
 S3_ACCESS_KEY_VARIABLE = "ULDUAR_TEST_S3_ACCESS_KEY"
 S3_SECRET_KEY_VARIABLE = "ULDUAR_TEST_S3_SECRET_KEY"
+S3_WRITER_ACCESS_KEY_VARIABLE = "ULDUAR_TEST_S3_WRITER_ACCESS_KEY"
+S3_WRITER_SECRET_KEY_VARIABLE = "ULDUAR_TEST_S3_WRITER_SECRET_KEY"
+S3_DELETER_ACCESS_KEY_VARIABLE = "ULDUAR_TEST_S3_DELETER_ACCESS_KEY"
+S3_DELETER_SECRET_KEY_VARIABLE = "ULDUAR_TEST_S3_DELETER_SECRET_KEY"
 REQUIRE_SERVICES_VARIABLE = "ULDUAR_REQUIRE_SERVICES"
 
 
@@ -59,6 +83,10 @@ def default_environment() -> dict[str, str]:
         S3_ENDPOINT_VARIABLE: DEFAULT_S3_ENDPOINT,
         S3_ACCESS_KEY_VARIABLE: OBJECT_STORE_ACCESS_KEY,
         S3_SECRET_KEY_VARIABLE: OBJECT_STORE_SECRET_KEY,
+        S3_WRITER_ACCESS_KEY_VARIABLE: OBJECT_STORE_WRITER_ACCESS_KEY,
+        S3_WRITER_SECRET_KEY_VARIABLE: OBJECT_STORE_WRITER_SECRET_KEY,
+        S3_DELETER_ACCESS_KEY_VARIABLE: OBJECT_STORE_DELETER_ACCESS_KEY,
+        S3_DELETER_SECRET_KEY_VARIABLE: OBJECT_STORE_DELETER_SECRET_KEY,
     }
 
 
@@ -83,6 +111,37 @@ def _object_store_ready(_container: str) -> bool:
         return False
 
 
+def _policy(actions: list[str]) -> str:
+    """A one-line IAM policy allowing *actions* on the test buckets."""
+    statement = {"Effect": "Allow", "Action": actions, "Resource": TEST_BUCKET_ARNS}
+    return json.dumps({"Version": "2012-10-17", "Statement": [statement]}, separators=(",", ":"))
+
+
+def provisioning_script() -> str:
+    """The shell script (run with `mc` inside the object-store container) that creates the writer and the deleter.
+
+    Idempotent: re-running it re-creates the policies and users and tolerates an attached policy. The dev
+    container's one-shot service (`.devcontainer/docker-compose.yml`) runs the same lines.
+    """
+    lines = [
+        "set -e",
+        f"until mc alias set local http://{HOST}:9000 {OBJECT_STORE_ACCESS_KEY} {OBJECT_STORE_SECRET_KEY}"
+        " >/dev/null 2>&1; do sleep 1; done",
+    ]
+    users = (
+        (OBJECT_STORE_WRITER_ACCESS_KEY, OBJECT_STORE_WRITER_SECRET_KEY, WRITER_ACTIONS),
+        (OBJECT_STORE_DELETER_ACCESS_KEY, OBJECT_STORE_DELETER_SECRET_KEY, DELETER_ACTIONS),
+    )
+    for access_key, secret_key, actions in users:
+        lines += [
+            f"echo '{_policy(actions)}' > /tmp/{access_key}.json",
+            f"mc admin policy create local {access_key} /tmp/{access_key}.json",
+            f"mc admin user add local {access_key} {secret_key}",
+            f"mc admin policy attach local {access_key} --user {access_key}",
+        ]
+    return "\n".join(lines)
+
+
 class Service(NamedTuple):
     name: str
     container: str
@@ -92,6 +151,7 @@ class Service(NamedTuple):
     environment: dict[str, str]
     command: list[str]
     ready: Callable[[str], bool]
+    setup_script: str = ""  # run with `sh -c` inside the container once the service answers
 
 
 SERVICES = (
@@ -102,7 +162,7 @@ SERVICES = (
     Service(
         "object-store", "ulduar-test-s3", OBJECT_STORE_IMAGE, OBJECT_STORE_PORT, 9000,
         {"MINIO_ROOT_USER": OBJECT_STORE_ACCESS_KEY, "MINIO_ROOT_PASSWORD": OBJECT_STORE_SECRET_KEY},
-        ["server", "/data"], _object_store_ready,
+        ["server", "/data"], _object_store_ready, provisioning_script(),
     ),
 )  # fmt: skip
 SERVICE_NAMES = tuple(service.name for service in SERVICES)
@@ -141,6 +201,11 @@ def start_one(service: Service) -> int:
     if not _wait_until_ready(service):
         print(f"❌ test-services: {service.image} did not become ready in {START_TIMEOUT_SECONDS}s", file=sys.stderr)
         return 1
+    if service.setup_script:
+        setup = _docker("exec", service.container, "sh", "-c", service.setup_script)
+        if setup.returncode != 0:
+            print(f"❌ test-services: {service.name}: provisioning failed: {setup.stderr.strip()}", file=sys.stderr)
+            return 1
     print(f"✅ test-services: {service.name} ({service.image}) is ready on {HOST}:{service.port}")
     return 0
 

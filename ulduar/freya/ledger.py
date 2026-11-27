@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib.resources import files
@@ -22,9 +24,9 @@ from psycopg.rows import TupleRow
 
 import ulduar
 from ulduar import _db
+from ulduar._schema import SCHEMA, Connection, qualified
 from ulduar.config import Config
 from ulduar.errors import ConfigurationError, LedgerError, SchemaVersionError
-from ulduar.freya._records import SCHEMA, qualified
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +290,32 @@ def open_ledger_connection(config: Config, purpose: str) -> psycopg.Connection[T
     if settings.ledger_dsn_env is None:
         raise ConfigurationError(f"archivum.ledger_dsn_env is not set — {purpose} needs the ledger role")
     return _db.open_connection(settings.ledger_dsn_env, settings)
+
+
+@contextmanager
+def ledger_transaction(config: Config, what: str, *, purpose: str | None = None) -> Iterator[Connection]:
+    """One transaction as the ledger role with the time limits, after the schema check; the connection closes after.
+
+    A driver error is raised as the package's exception, worded `<what> failed`; `ConfigurationError` without
+    `archivum.ledger_dsn_env`, naming *purpose* (default *what*). The hook through which Ulduar's components run
+    ledger-role calls, the counterpart of `Catalog.transaction`.
+    """
+    with transaction_with_steps(config, what, purpose, load_steps()) as tx:
+        yield tx
+
+
+@contextmanager
+def transaction_with_steps(
+    config: Config, what: str, purpose: str | None, steps: tuple[Step, ...]
+) -> Iterator[Connection]:
+    """`ledger_transaction` checking the schema against *steps*, for a caller that runs many and loads them once."""
+    settings = config.archivum
+    with (
+        open_ledger_connection(config, what if purpose is None else purpose) as conn,
+        _db.translated_transaction(conn, settings, what) as tx,
+    ):
+        check_schema(tx, steps)
+        yield tx
 
 
 def install(config: Config, *, allow_breaking: bool = False) -> SchemaStatus:

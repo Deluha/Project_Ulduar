@@ -88,6 +88,7 @@ def test_a_scope_the_project_lacks_is_unknown(archivum: Archivum, tmp_path: Path
 
 
 def test_the_facade_exports_every_name_it_lists() -> None:
+    assert {"Connection", "ARTIFACT_KINDS"} <= set(freya.__all__)
     assert all(hasattr(freya, name) for name in freya.__all__)
     assert len(set(freya.__all__)) == len(freya.__all__)
     assert not {"Step", "load_steps"} & set(freya.__all__)  # the step machinery is internal
@@ -202,7 +203,9 @@ def test_an_old_month_without_a_partition_is_created_and_the_insert_retried(
         assert catalog.register_artifact("log", CHECKSUM, 1, record_id=old.artifact_id) == old
     assert partition_exists(archivum, "artifact", long_ago)
     created = [r.getMessage() for r in caplog.records if r.name == "ulduar.freya._records"]
-    assert len(created) == 1 and created[0].startswith("created 2 time partition(s) for ")  # artifact and edge
+    assert len(created) == 1 and created[0].startswith(
+        "created 4 time partition(s) for "
+    )  # the four partitioned histories
     assert _ids.uuid7_time(old.artifact_id).strftime("%Y-%m") in created[0]
 
 
@@ -482,3 +485,87 @@ def test_an_artifact_may_only_name_a_dataset_of_its_own_scope(archivum: Archivum
         assert catalog.find_artifacts(scope="default") == []
         recorded = catalog.register_artifact("log", CHECKSUM, 1, dataset=staged, scope="staging")
         assert recorded.dataset_id == staged.dataset_id
+
+
+# --- Catalog.transaction: the hook the other components record through ---
+
+
+def make_dataset_row(tx: psycopg.Connection, project_id: uuid.UUID, name: str) -> None:
+    dataset_id = _ids.uuid7()
+    tx.execute(
+        "INSERT INTO ulduar.dataset (project_id, scope, dataset_id, namespace, name, event_at)"
+        " VALUES (%s, 'default', %s, 'ns', %s, %s)",
+        (project_id, dataset_id, name, _ids.uuid7_time(dataset_id)),
+    )
+
+
+def test_a_transaction_commits_what_its_work_wrote_and_returns_its_result(archivum: Archivum, tmp_path: Path) -> None:
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        project_id = catalog.project.project_id
+        assert catalog.transaction("Writing", lambda tx: make_dataset_row(tx, project_id, "kept") or "done") == "done"
+        assert catalog.get_dataset("ns", "kept").name == "kept"
+    assert count(archivum, "SELECT count(*) FROM ulduar.dataset") == 1
+
+
+def test_a_transaction_rolls_back_when_its_work_raises_and_the_session_stays_usable(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    class Boom(Exception):
+        pass
+
+    def work(tx: psycopg.Connection) -> None:
+        make_dataset_row(tx, catalog.project.project_id, "lost")
+        raise Boom
+
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        with pytest.raises(Boom):
+            catalog.transaction("Writing", work)
+        assert catalog.register_dataset("ns", "after").name == "after"
+    assert count(archivum, "SELECT count(*) FROM ulduar.dataset") == 1
+
+
+def test_a_transaction_raises_a_driver_error_as_the_package_error_worded_with_what(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        with pytest.raises(IsolationError, match=r"^Deleting the history failed: "):
+            catalog.transaction("Deleting the history", lambda tx: tx.execute("DELETE FROM ulduar.artifact"))
+        with pytest.raises(UlduarError, match=r"^Dividing failed: division by zero"):
+            catalog.transaction("Dividing", lambda tx: tx.execute("SELECT 1/0"), event_ats=[datetime.now(UTC)])
+
+
+def test_a_transaction_carries_the_sessions_time_limits(archivum: Archivum, tmp_path: Path) -> None:
+    config = onboarded(archivum, tmp_path, statement_timeout_s=7, lock_timeout_s=3, call_budget_s=11)
+    with open_catalog(config) as catalog:
+        seen = catalog.transaction(
+            "Reading limits",
+            lambda tx: tx.execute(
+                "SELECT current_setting('statement_timeout'), current_setting('lock_timeout'),"
+                " current_setting('transaction_timeout')"
+            ).fetchone(),
+        )
+    assert seen == ("7s", "3s", "11s")
+
+
+def test_a_transaction_with_event_ats_creates_a_missing_partition_and_runs_the_work_again(
+    archivum: Archivum, tmp_path: Path
+) -> None:
+    long_ago = ms_ago(450)
+    artifact_id = _ids.uuid7(long_ago)
+    runs: list[int] = []
+
+    def work(tx: psycopg.Connection) -> int:
+        runs.append(1)
+        tx.execute(
+            "INSERT INTO ulduar.artifact (project_id, scope, artifact_id, event_at, kind, checksum_algorithm,"
+            " checksum, size_bytes) VALUES (%s, 'default', %s, %s, 'log', 'sha256', %s, 1)",
+            (project_id, artifact_id, _ids.uuid7_time(artifact_id), CHECKSUM),
+        )
+        return len(runs)
+
+    with open_catalog(onboarded(archivum, tmp_path)) as catalog:
+        project_id = catalog.project.project_id
+        assert not partition_exists(archivum, "artifact", long_ago)
+        assert catalog.transaction("Inserting an old artifact", work, event_ats=[_ids.uuid7_time(artifact_id)]) == 2
+        assert catalog.get_artifact(artifact_id).artifact_id == artifact_id
+    assert partition_exists(archivum, "artifact", long_ago)

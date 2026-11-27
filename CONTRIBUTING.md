@@ -29,7 +29,7 @@ One line each; the contracts are in the pointers (`qa-and-ci.md` and `checkers.m
 | `ci-pre-commit` | Runs every pre-commit-stage hook on the whole tree, then a pinned, checksum-verified gitleaks scan of the PR's commits and the tree (`qa-and-ci.md#gates`) |
 | `ci-docs-sync` | Fails a code change in a documented area without its doc, against the PR base (`checkers.md#checker-docs-sync`) |
 | `ci-tests` | `pytest` with coverage against the PostgreSQL 18 and MinIO test services, gating mypy and actionlint; ends in `CI gate` (`qa-and-ci.md#workflows`, which also lists the three checks to require on `main`) |
-| `dev_tools/check_conventions.py` | The mechanical code conventions, rules C1–C9 (`checkers.md#checker-project-conventions`) |
+| `dev_tools/check_conventions.py` | The mechanical code conventions, rules C1–C10 (`checkers.md#checker-project-conventions`) |
 | `dev_tools/check_guidance_integrity.py` | Guidance pointers, anchors, size budget, routing, rule files and command skills (`checkers.md#checker-guidance-integrity`) |
 | `dev_tools/check_docs_sync.py` | The docs-sync guard of the commit-msg hook and `ci-docs-sync` (`checkers.md#checker-docs-sync`) |
 | `dev_tools/verify.py` | The one command to run before a PR: every step above plus `ruff`, `mypy` and `pytest`, one pass/fail table (`qa-and-ci.md#verify`) |

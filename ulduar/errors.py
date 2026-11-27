@@ -38,3 +38,15 @@ class LineageCycleError(UlduarError):
 
 class IsolationError(UlduarError):
     """The Archivum refused the call by row-level security or privileges: the role may not do that."""
+
+
+class ArchiveUnavailable(UlduarError):
+    """The archive store could not be used: unreachable, timed out, or refused the credential."""
+
+
+class IntegrityError(UlduarError):
+    """An archived object does not match its recorded checksum or size, or is missing or unreadable."""
+
+
+class ArchiveFormatError(UlduarError):
+    """The archive store's format marker is missing, foreign or of a version this library does not know."""

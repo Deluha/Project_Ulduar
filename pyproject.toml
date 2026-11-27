@@ -20,8 +20,10 @@ dependencies = ["psycopg>=3.2,<4"]
 
 [project.optional-dependencies]
 binary = ["psycopg[binary]>=3.2,<4"]
-# psycopg and boto3 are the test suite's clients for the local test services only; the
-# package's storage client is decided at Phase 2's sign-off.
+# The S3 backend's client (Phase 2 sign-off H21).
+s3 = ["boto3>=1.36,<2"]
+# psycopg and boto3 are the test suite's clients for the local test services; boto3 also runs the
+# S3 backend under test (the `s3` extra above).
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -58,6 +60,11 @@ markers = [
 python_version = "3.11"
 files = ["ulduar", "dev_tools", ".claude/hooks"]
 strict = true
+
+# boto3 and botocore ship no type information: the client is typed `Any` at the boundary (ulduar/hodir/_s3.py).
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
 
 # Ruff: pycodestyle, pyflakes, bugbear, import order and pyupgrade.
 [tool.ruff]

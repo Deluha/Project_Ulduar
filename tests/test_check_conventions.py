@@ -1,4 +1,4 @@
-"""Tests for dev_tools/check_conventions.py: each rule C1–C9 on synthetic input, then the real repo."""
+"""Tests for dev_tools/check_conventions.py: each rule C1–C10 on synthetic input, then the real repo."""
 
 from __future__ import annotations
 
@@ -136,6 +136,60 @@ def test_c7_cli_entry() -> None:
     ]
     out = cc.check_cli_entry(sources)
     assert [line.split(":")[1] for line in out] == ["1", "2"]
+
+
+def test_c10_component_boundaries_fail_on_another_components_internals() -> None:
+    bad = (
+        "import ulduar.hodir._store\n"  # a sub-module, plain import
+        "from ulduar.hodir import _records\n"  # a private name of the facade
+        "from ulduar.hodir.archive import Archive\n"  # a sub-module, from-import
+        "from ulduar.hodir import archive as a, _x, Public\n"  # only the private name fails
+        "import ulduar.hodir.archive as alias\n"
+    )
+    sources = [(PKG + "freya/a.py", bad), (PKG + "hodir/__init__.py", ""), (PKG + "hodir/archive.py", "")]
+    out = cc.check_component_boundaries(sources)
+    assert [line.split(":")[1] for line in out] == ["1", "2", "3", "4", "5"]
+    assert (
+        out[0] == f"{PKG}freya/a.py:1: C10 `ulduar.hodir._store` reaches into component hodir outside its facade (R10)"
+    )
+    assert out[1].split(" ")[2] == "`_records`" and out[3].split(" ")[2] == "`_x`"
+    reverse = [(PKG + "hodir/b.py", "from ulduar.freya.ledger import x\n"), (PKG + "freya/__init__.py", "")]
+    assert [line.split(":")[1] for line in cc.check_component_boundaries(reverse)] == ["1"]
+
+
+def test_c10_component_boundaries_allow_the_facade_shared_private_modules_and_the_component_itself() -> None:
+    good = (
+        "import ulduar.hodir\n"
+        "from ulduar import hodir\n"
+        "from ulduar.hodir import Archive, open_archive\n"
+        "from ulduar import _db, _ids\n"
+        "from ulduar._schema import apply\n"
+        "import ulduar._db\n"
+        "from ulduar.config import Config\n"
+        "from ulduar.freya import _records\n"  # its own component's private name
+        "from ulduar.freya.ledger import x\n"
+        "import ulduar.freya.steps.one\n"
+        "from . import _records\n"
+        "from .ledger import x\n"
+        "from .steps import one\n"
+        "import os\n"
+    )
+    sources = [(PKG + "freya/a.py", good), (PKG + "hodir/__init__.py", ""), (PKG + "freya/ledger.py", "")]
+    assert cc.check_component_boundaries(sources) == []
+
+
+def test_c10_top_level_modules_and_private_packages_are_not_components() -> None:
+    reaching = "from ulduar.hodir._store import x\nfrom ulduar.freya import _records\n"
+    sources = [
+        (PKG + "mimiron.py", reaching),  # a top-level module is no component: it may be held to the facade by review
+        (PKG + "_db.py", reaching),
+        (PKG + "_shared/m.py", reaching),  # a private sub-package is no component
+        (PKG + "hodir/__init__.py", ""),
+        (PKG + "freya/__init__.py", ""),
+        ("dev_tools/x.py", reaching),
+        ("tests/test_x.py", reaching),
+    ]
+    assert cc.check_component_boundaries(sources) == []
 
 
 def test_c8_forbidden_tracked() -> None:

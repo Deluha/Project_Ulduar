@@ -1,8 +1,8 @@
-"""ulduar.freya.ledger: the schema ledger, step 1's schema, and the refusals of an unsupported schema.
+"""ulduar.freya.ledger: the schema ledger, what steps 1 and 2 build, and the refusals of an unsupported schema.
 
 The changing-own-schema checklist: "applies every step in order to an empty database" and "running the
-ledger again applies no step" are covered below. "Installs the previous release's schema" does not apply
-yet: step 1 is the first step and no release has shipped one.
+ledger again applies no step" are covered below, and step 2 is applied over an Archivum installed with step 1
+only, whose rows must survive (no release has shipped a step yet, so step 1 is the previous schema).
 """
 
 from __future__ import annotations
@@ -49,7 +49,9 @@ from ulduar.freya.ledger import (
 )
 
 STEP_ONE_FILE = "0001_catalog.sql"
+STEP_TWO_FILE = "0002_archive.sql"
 APPLIED_LOG = "applied Archivum schema step"
+PARTITIONED = ("lineage_edge", "artifact", "archive_check", "archive_finding")
 BREAKING_TWO = (
     "-- ulduar-kind: breaking\n-- ulduar-min-library: 0.1.0\nCREATE TABLE ulduar.synthetic_two (x integer);\n"
 )
@@ -175,19 +177,21 @@ def test_load_steps_ignores_files_that_are_not_sql(tmp_path: Path) -> None:
 # --- install ---
 
 
-def test_install_applies_step_one_to_an_empty_database_and_records_it(
+def test_install_applies_every_step_in_order_to_an_empty_database_and_records_them(
     archivum: Archivum, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO, logger="ulduar.freya.ledger")
     status = install(archivum.config(tmp_path))
     assert status == SchemaStatus(
-        applied_step=1, known_step=1, pending=(), min_library_version="0.1.0", compatible=True
+        applied_step=2, known_step=2, pending=(), min_library_version="0.1.0", compatible=True
     )
-    [(number, name, kind, checksum, min_library, applied_by)] = ledger_rows(archivum)
-    assert (number, name, kind, min_library) == (1, "catalog", "additive", "0.1.0")
-    assert checksum == sha256(real_step_one()).digest()
-    assert applied_by
-    assert applied_log_count(caplog) == 1
+    one, two = ledger_rows(archivum)
+    assert one[:3] == (1, "catalog", "additive") and one[4] == "0.1.0"
+    assert one[3] == sha256(real_step_one()).digest()
+    assert two[:3] == (2, "archive", "additive") and two[4] == "0.1.0"
+    assert two[3] == sha256((files("ulduar.freya") / "steps" / STEP_TWO_FILE).read_bytes()).digest()
+    assert one[5] and two[5]
+    assert applied_log_count(caplog) == 2
 
 
 def test_a_second_install_applies_nothing(archivum: Archivum, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -208,11 +212,13 @@ def test_install_without_a_ledger_variable_is_a_configuration_error(archivum: Ar
         install(config)
 
 
-def test_install_creates_this_month_and_three_ahead_for_both_histories(archivum: Archivum, tmp_path: Path) -> None:
+def test_install_creates_this_month_and_three_ahead_for_every_partitioned_history(
+    archivum: Archivum, tmp_path: Path
+) -> None:
     install(archivum.config(tmp_path))
     now = datetime.now(UTC)
     months = [(now.year + (now.month - 1 + i) // 12, (now.month - 1 + i) % 12 + 1) for i in range(4)]
-    expected = {f"{table}_{year}_{month:02d}" for table in ("artifact", "lineage_edge") for year, month in months}
+    expected = {f"{table}_{year}_{month:02d}" for table in PARTITIONED for year, month in months}
     with archivum.superuser() as su:
         found = {
             r[0]
@@ -285,9 +291,9 @@ def test_two_installs_at_once_apply_the_step_once_and_both_succeed(
     config = archivum.config(tmp_path, lock_timeout_s=60)
     with ThreadPoolExecutor(max_workers=2) as pool:
         statuses = [f.result() for f in [pool.submit(install, config), pool.submit(install, config)]]
-    assert all(s.applied_step == 1 and s.pending == () for s in statuses)
-    assert [r[0] for r in ledger_rows(archivum)] == [1]
-    assert applied_log_count(caplog) == 1
+    assert all(s.applied_step == 2 and s.pending == () for s in statuses)
+    assert [r[0] for r in ledger_rows(archivum)] == [1, 2]
+    assert applied_log_count(caplog) == 2
 
 
 def test_a_ledger_lock_held_beyond_the_lock_timeout_is_a_ledger_error(archivum: Archivum, tmp_path: Path) -> None:
@@ -296,7 +302,7 @@ def test_a_ledger_lock_held_beyond_the_lock_timeout_is_a_ledger_error(archivum: 
         holder.execute("SELECT pg_advisory_lock(%s)", (LEDGER_LOCK_KEY,))
         with pytest.raises(LedgerError, match="ledger lock"):
             install(config)
-    assert install(config).applied_step == 1
+    assert install(config).applied_step == 2
 
 
 # --- check_schema and schema_status ---
@@ -329,15 +335,15 @@ def test_an_unknown_applied_breaking_step_is_refused_and_an_additive_one_accepte
 ) -> None:
     insert = (
         "INSERT INTO ulduar.schema_ledger (step, name, kind, checksum, min_library_version, applied_by_version)"
-        " VALUES (2, 'from_the_future', %s, decode(repeat('01', 32), 'hex'), '0.1.0', '9.9.9')"
+        " VALUES (3, 'from_the_future', %s, decode(repeat('01', 32), 'hex'), '0.1.0', '9.9.9')"
     )
     with archivum.superuser() as su:
         su.execute(insert, ("additive",))
     with ledger_connection(installed) as conn:
         status = check_schema(conn, load_steps())
-    assert (status.applied_step, status.known_step, status.compatible) == (2, 1, True)
+    assert (status.applied_step, status.known_step, status.compatible) == (3, 2, True)
     with archivum.superuser() as su:
-        su.execute("UPDATE ulduar.schema_ledger SET kind = 'breaking' WHERE step = 2")
+        su.execute("UPDATE ulduar.schema_ledger SET kind = 'breaking' WHERE step = 3")
     with ledger_connection(installed) as conn, pytest.raises(SchemaVersionError, match="from_the_future"):
         check_schema(conn, load_steps())
     with pytest.raises(SchemaVersionError, match="from_the_future"):
@@ -475,13 +481,13 @@ def test_drop_empty_partitions_drops_only_empty_ended_months(installed: Config) 
     with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
         assert inside.execute(
             "SELECT ulduar.ensure_partitions(%s, 0)", (datetime(2020, 1, 15, tzinfo=UTC),)
-        ).fetchone() == (2,)
+        ).fetchone() == (4,)
         insert_artifact(inside, seed_project(inside), january)
     with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
         before_month_end = datetime(2020, 1, 31, tzinfo=UTC)
         assert inside.execute("SELECT ulduar.drop_empty_partitions(%s)", (before_month_end,)).fetchone() == (0,)
         after_month_end = datetime(2020, 2, 1, tzinfo=UTC)
-        assert inside.execute("SELECT ulduar.drop_empty_partitions(%s)", (after_month_end,)).fetchone() == (1,)
+        assert inside.execute("SELECT ulduar.drop_empty_partitions(%s)", (after_month_end,)).fetchone() == (3,)
         assert inside.execute(names, ("%_2020_01",)).fetchall() == [("artifact_2020_01",)]
         assert inside.execute("SELECT ulduar.drop_empty_partitions(now())").fetchone() == (
             0,
@@ -535,8 +541,8 @@ def test_two_callers_for_the_same_new_month_both_succeed_and_one_partition_is_ma
         wait_until_blocked(archivum, 2)  # both are in the function, queued behind the lock
         holder.execute("SELECT pg_advisory_unlock(%s)", (PARTITION_LOCK_KEY,))
         made = sorted(call.result(timeout=30) for call in calls)
-    assert made == [0, 2]  # the artifact and the lineage partition, made by one caller only
-    assert len(partition_names(archivum, month)) == 2
+    assert made == [0, 4]  # the four partitions of the month, made by one caller only
+    assert len(partition_names(archivum, month)) == 4
 
 
 def test_a_partition_another_session_made_meanwhile_is_not_an_error(archivum: Archivum, installed: Config) -> None:
@@ -552,8 +558,8 @@ def test_a_partition_another_session_made_meanwhile_is_not_an_error(archivum: Ar
         call = pool.submit(ensure, installed, month)
         wait_until_blocked(archivum, 1)  # the function's own CREATE waits for the table lock, then finds the name taken
         other.execute("COMMIT")
-        assert call.result(timeout=30) == 1  # only the lineage partition is its own
-    assert len(partition_names(archivum, month)) == 2
+        assert call.result(timeout=30) == 3  # all but the artifact partition are its own
+    assert len(partition_names(archivum, month)) == 4
 
 
 @pytest.mark.parametrize("offset", [timedelta(days=-365 * 16), timedelta(days=365 * 3)])
@@ -561,7 +567,7 @@ def test_a_time_outside_the_partition_window_is_refused_clearly(installed: Confi
     error = refusal(installed, "SELECT ulduar.ensure_partitions(%s, 0)", (datetime.now(UTC) + offset,))
     assert type(error) is UlduarError
     assert "outside the window from 15 years ago to 2 years ahead" in str(error)
-    assert ensure(installed, month_start(23)) == 2  # inside it, 23 months ahead
+    assert ensure(installed, month_start(23)) == 4  # inside it, 23 months ahead
 
 
 def test_partition_bounds_are_utc_month_starts_whatever_the_session_settings(
@@ -572,7 +578,7 @@ def test_partition_bounds_are_utc_month_starts_whatever_the_session_settings(
         inside.execute("SET LOCAL TimeZone = 'Pacific/Kiritimati'")
         inside.execute("SET LOCAL DateStyle = 'German'")
         assert inside.execute("SELECT ulduar.ensure_partitions(%s, 0)", (month + timedelta(days=14),)).fetchone() == (
-            2,
+            4,
         )
     with archivum.superuser() as su:
         su.execute("SET TimeZone = 'UTC'")
@@ -582,7 +588,7 @@ def test_partition_bounds_are_utc_month_starts_whatever_the_session_settings(
     assert bounds == (f"FOR VALUES FROM ('{month:%Y-%m-%d} 00:00:00+00') TO ('{month_start(7):%Y-%m-%d} 00:00:00+00')",)
 
 
-@pytest.mark.parametrize("table", ["artifact", "lineage_edge"])
+@pytest.mark.parametrize("table", PARTITIONED)
 def test_a_partition_cannot_be_truncated_even_by_the_ledger_role(installed: Config, table: str) -> None:
     error = refusal(installed, f"TRUNCATE ulduar.{table}_{datetime.now(UTC):%Y_%m}")
     assert isinstance(error, IsolationError)
@@ -606,3 +612,213 @@ def test_every_partition_ensure_partitions_makes_carries_the_truncate_trigger(
 
 def test_install_takes_no_steps_argument() -> None:
     assert list(inspect.signature(install).parameters) == ["config", "allow_breaking"]
+
+
+# --- what step 2 builds ---
+
+ARCHIVE_TABLES = (
+    "archive_registration",
+    "archive_retention_rule",
+    "archive_deletion",
+    "archive_check",
+    "archive_finding",
+)
+
+
+def insert_registration(
+    conn: Connection,
+    project_id: uuid.UUID,
+    artifact_id: uuid.UUID,
+    *,
+    scope: str = "default",
+    at: datetime | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO ulduar.archive_registration (project_id, scope, artifact_id, event_at) VALUES (%s, %s, %s, %s)",
+        (project_id, scope, artifact_id, at or uuid7_time(artifact_id)),
+    )
+
+
+def insert_history_rule(conn: Connection, project_id: uuid.UUID, history: str) -> None:
+    rule_id = uuid7()
+    conn.execute(
+        "INSERT INTO ulduar.history_retention_rule (project_id, rule_id, event_at, history, keep_days)"
+        " VALUES (%s, %s, %s, %s, 30)",
+        (project_id, rule_id, uuid7_time(rule_id), history),
+    )
+
+
+def test_step_two_applies_over_step_one_and_the_rows_of_step_one_stay(archivum: Archivum, tmp_path: Path) -> None:
+    config = archivum.config(tmp_path)
+    assert _install(config, load_steps()[:1], allow_breaking=False).applied_step == 1
+    with ledger_connection(config) as conn, _db.transaction(conn, config.archivum):
+        project = seed_project(conn)
+        artifact = insert_artifact(conn, project)
+    with archivum.superuser() as su:
+        assert su.execute("SELECT to_regclass('ulduar.archive_registration')").fetchone() == (None,)
+    status = install(config)
+    assert (status.applied_step, status.pending) == (2, ())
+    with ledger_connection(config) as conn, _db.transaction(conn, config.archivum) as inside:
+        assert inside.execute("SELECT artifact_id FROM ulduar.artifact").fetchall() == [(artifact,)]
+        insert_registration(inside, project, artifact)
+        insert_history_rule(inside, project, "archive_check")
+    assert [r[0] for r in ledger_rows(archivum)] == [1, 2]
+
+
+def test_installing_again_changes_nothing_and_every_archive_table_has_forced_row_level_security(
+    archivum: Archivum, installed: Config
+) -> None:
+    before = ledger_rows(archivum)
+    assert install(installed).pending == ()
+    assert ledger_rows(archivum) == before
+    for table in ARCHIVE_TABLES:
+        flags = count(
+            archivum,
+            "SELECT count(*) FROM pg_class WHERE oid = to_regclass(%s) AND relrowsecurity AND relforcerowsecurity",
+            f"ulduar.{table}",
+        )
+        assert flags == 1, table
+
+
+def test_the_history_list_of_retention_rules_is_widened_and_nothing_else_is_accepted(installed: Config) -> None:
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
+        project = seed_project(inside)
+        for history in ("artifact", "lineage_edge", "archive_check", "archive_finding"):
+            insert_history_rule(inside, project, history)
+    with ledger_connection(installed) as conn:
+        with pytest.raises(psycopg.Error, match="history_retention_rule_history_check") as caught:
+            with _db.transaction(conn, installed.archivum) as inside:
+                insert_history_rule(inside, project, "archive_registration")
+        assert caught.value.sqlstate == "23514"
+
+
+def test_ensure_partitions_makes_the_check_histories_and_keeps_its_grants(
+    archivum: Archivum, installed: Config
+) -> None:
+    month = month_start(18)
+    assert ensure(installed, month) == 4
+    for table in ("archive_check", "archive_finding"):
+        name = f"{table}_{month:%Y_%m}"
+        assert partition_names(archivum, month).count(name) == 1
+        error = refusal(installed, f"TRUNCATE ulduar.{name}")
+        assert isinstance(error, IsolationError) and "append-only" in str(error)
+    privileges = (
+        "SELECT has_function_privilege('ulduar_recorder', 'ulduar.ensure_partitions(timestamptz, integer)', 'EXECUTE'),"
+        " has_function_privilege('ulduar_recorder', 'ulduar.drop_empty_partitions(timestamptz)', 'EXECUTE'),"
+        " has_function_privilege('public', 'ulduar.ensure_partitions(timestamptz, integer)', 'EXECUTE'),"
+        " has_function_privilege('ulduar_recorder', 'ulduar.artifact_is_archived(uuid, uuid)', 'EXECUTE'),"
+        " has_function_privilege('public', 'ulduar.artifact_is_archived(uuid, uuid)', 'EXECUTE')"
+    )
+    with archivum.superuser() as su:
+        assert su.execute(privileges).fetchone() == (True, False, False, True, False)
+
+
+def test_drop_empty_partitions_covers_the_check_histories(installed: Config, archivum: Archivum) -> None:
+    january = datetime(2020, 1, 15, tzinfo=UTC)
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
+        assert inside.execute("SELECT ulduar.ensure_partitions(%s, 0)", (january,)).fetchone() == (4,)
+        check_id = uuid7(int(january.timestamp() * 1000))
+        inside.execute(
+            "INSERT INTO ulduar.archive_check (project_id, check_id, event_at, scope, kind, mode, objects_checked,"
+            " findings) VALUES (%s, %s, %s, 'default', 'verification', 'full', 1, 0)",
+            (seed_project(inside), check_id, uuid7_time(check_id)),
+        )
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
+        assert inside.execute(
+            "SELECT ulduar.drop_empty_partitions(%s)", (datetime(2020, 2, 1, tzinfo=UTC),)
+        ).fetchone() == (3,)
+    assert partition_names(archivum, january) == ["archive_check_2020_01"]
+
+
+def test_a_registration_must_name_an_artifact_of_its_project_scope_and_time(installed: Config) -> None:
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum):
+        mine, other = seed_project(conn, "alpha"), seed_project(conn, "beta")
+        artifact, foreign = insert_artifact(conn, mine), insert_artifact(conn, other)
+        conn.execute("INSERT INTO ulduar.scope (project_id, scope) VALUES (%s, 'second')", (mine,))
+    insert = (
+        "INSERT INTO ulduar.archive_registration (project_id, scope, artifact_id, event_at) VALUES (%s, %s, %s, %s)"
+    )
+    for scope, artifact_id, at in [
+        ("default", uuid7(), datetime.now(UTC)),  # no such artifact
+        ("default", foreign, uuid7_time(foreign)),  # another project's
+        ("second", artifact, uuid7_time(artifact)),  # another scope
+        ("default", artifact, uuid7_time(artifact) + timedelta(milliseconds=1)),  # another time
+    ]:
+        error = refusal(installed, insert, (mine, scope, artifact_id, at))
+        assert isinstance(error, UnknownRecordError), (scope, artifact_id)
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
+        insert_registration(inside, mine, artifact)
+
+
+def seed_archive_row(conn: Connection, table: str) -> None:
+    """One row of the archive table *table* in a project of its own: the row triggers fire only on a row."""
+    project = seed_project(conn, f"p{uuid.uuid4().hex[:8]}")
+    record = uuid7()
+    at = uuid7_time(record)
+    if table == "archive_registration":
+        insert_registration(conn, project, insert_artifact(conn, project))
+        return
+    inserts = {
+        "archive_retention_rule": (
+            "INSERT INTO ulduar.archive_retention_rule (project_id, rule_id, event_at, retention_class, keep_newest,"
+            " shortening_confirmed) VALUES (%s, %s, %s, 'c', 1, false)"
+        ),
+        "archive_deletion": (
+            "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes,"
+            f" stage, cause) VALUES (%s, %s, %s, 'default', '\\x{'00' * 32}', 0, 'intent', 'incomplete_put')"
+        ),
+        "archive_check": (
+            "INSERT INTO ulduar.archive_check (project_id, check_id, event_at, scope, kind, mode, objects_checked,"
+            " findings) VALUES (%s, %s, %s, 'default', 'verification', 'full', 1, 0)"
+        ),
+        "archive_finding": (
+            "INSERT INTO ulduar.archive_finding (project_id, finding_id, event_at, check_id, scope, outcome)"
+            " VALUES (%s, %s, %s, gen_random_uuid(), 'default', 'passed')"
+        ),
+    }
+    conn.execute(inserts[table], (project, record, at))
+
+
+def refusal_with_row(config: Config, table: str, statement: str, maintenance: str | None = None) -> Exception:
+    """The package exception for *statement* run, with one row of *table* present, as the ledger role."""
+    with ledger_connection(config) as conn:
+        with pytest.raises(psycopg.Error) as caught, _db.transaction(conn, config.archivum) as inside:
+            seed_archive_row(inside, table)
+            if maintenance:
+                inside.execute("SELECT set_config('ulduar.maintenance', %s, true)", (maintenance,))
+            inside.execute(statement)
+    return _db.translate(caught.value, "Probing the Archivum")
+
+
+@pytest.mark.parametrize("table", ARCHIVE_TABLES)
+def test_the_archive_tables_refuse_update_delete_and_truncate_outside_maintenance(
+    installed: Config, table: str
+) -> None:
+    for statement in (
+        f"DELETE FROM ulduar.{table}",
+        f"UPDATE ulduar.{table} SET recorded_at = now()",
+        f"TRUNCATE ulduar.{table}",
+    ):
+        error = refusal_with_row(installed, table, statement)
+        assert isinstance(error, IsolationError) and "append-only" in str(error), statement
+
+
+@pytest.mark.parametrize("table", ["archive_registration", "archive_check", "archive_finding"])
+def test_the_registration_and_the_check_histories_can_age_out_in_retention_mode_only(
+    installed: Config, table: str
+) -> None:
+    with ledger_connection(installed) as conn, _db.transaction(conn, installed.archivum) as inside:
+        seed_archive_row(inside, table)
+        inside.execute("SELECT set_config('ulduar.maintenance', 'retention', true)")
+        assert inside.execute(f"DELETE FROM ulduar.{table}").rowcount == 1
+    error = refusal_with_row(installed, table, f"UPDATE ulduar.{table} SET recorded_at = now()", "retention")
+    assert "append-only" in str(error)
+
+
+@pytest.mark.parametrize("table", ["archive_retention_rule", "archive_deletion"])
+@pytest.mark.parametrize("mode", ["retention", "redaction"])
+def test_a_rule_and_a_deletion_record_can_never_be_removed_even_in_maintenance_mode(
+    installed: Config, table: str, mode: str
+) -> None:
+    error = refusal_with_row(installed, table, f"DELETE FROM ulduar.{table}", mode)
+    assert isinstance(error, IsolationError) and "append-only" in str(error)

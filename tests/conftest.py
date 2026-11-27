@@ -14,8 +14,9 @@ import os
 import secrets
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -32,13 +33,20 @@ from dev_tools.services import (
     DSN_VARIABLE,
     REQUIRE_SERVICES_VARIABLE,
     S3_ACCESS_KEY_VARIABLE,
+    S3_DELETER_ACCESS_KEY_VARIABLE,
+    S3_DELETER_SECRET_KEY_VARIABLE,
     S3_ENDPOINT_VARIABLE,
     S3_SECRET_KEY_VARIABLE,
+    S3_WRITER_ACCESS_KEY_VARIABLE,
+    S3_WRITER_SECRET_KEY_VARIABLE,
 )
 from ulduar import _db, _ids
+from ulduar.config import ArchiveSettings, CredentialSettings, load_config
 from ulduar.config import Config as UlduarConfig
-from ulduar.config import load_config
-from ulduar.freya import install, onboard_project, open_catalog
+from ulduar.freya import Artifact, install, onboard_project, open_catalog
+from ulduar.hodir import Archive, open_archive
+from ulduar.hodir import _layout as hodir_layout
+from ulduar.hodir._store import open_store
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # Marker → the fixtures that make a test need that service.
@@ -48,6 +56,15 @@ SERVICE_LABELS = {"db": "database", "s3": "object-store"}
 # it names a host, so any of them can redirect a local-looking connection string.
 REDIRECTING_VARIABLES = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
 S3_SCHEMES = ("http", "https")
+S3_VARIABLES = (
+    S3_ENDPOINT_VARIABLE,
+    S3_ACCESS_KEY_VARIABLE,
+    S3_SECRET_KEY_VARIABLE,
+    S3_WRITER_ACCESS_KEY_VARIABLE,
+    S3_WRITER_SECRET_KEY_VARIABLE,
+    S3_DELETER_ACCESS_KEY_VARIABLE,
+    S3_DELETER_SECRET_KEY_VARIABLE,
+)
 TEST_BUCKET_PREFIX = "ulduar-test-"
 # The shared group role of step 1; the throwaway ledger role must be able to grant it to project roles.
 RECORDER_GROUP = "ulduar_recorder"
@@ -67,9 +84,15 @@ def lineage_lock_name(project_id: uuid.UUID) -> str:
 
 
 class S3Settings(NamedTuple):
+    """The object store's endpoint and the three credentials: the root user's, the archive's writer and deleter."""
+
     endpoint: str
     access_key: str
     secret_key: str
+    writer_access_key: str
+    writer_secret_key: str
+    deleter_access_key: str
+    deleter_secret_key: str
 
 
 def _required(environ: dict[str, str]) -> bool:
@@ -81,7 +104,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         names = set(getattr(item, "fixturenames", ()))
         for marker, fixtures in SERVICE_FIXTURES.items():
-            if fixtures & names:
+            # An explicit marker counts too: a test over every storage backend marks only its object-store cases.
+            if fixtures & names or item.get_closest_marker(marker):
                 item.add_marker(getattr(pytest.mark, marker))
                 _service_test_ids[marker].add(item.nodeid)
 
@@ -128,11 +152,10 @@ def resolve_s3(environ: dict[str, str]) -> tuple[S3Settings | None, str | None]:
     Same contract as resolve_dsn: missing settings skip or fail per the requirement, an
     endpoint off this machine always fails.
     """
-    names = (S3_ENDPOINT_VARIABLE, S3_ACCESS_KEY_VARIABLE, S3_SECRET_KEY_VARIABLE)
-    missing = [name for name in names if not environ.get(name)]
+    missing = [name for name in S3_VARIABLES if not environ.get(name)]
     if missing:
         return None, f"{', '.join(missing)} not set — object-store tests did not run (tests/README.md)"
-    settings = S3Settings(*(environ[name] for name in names))
+    settings = S3Settings(*(environ[name] for name in S3_VARIABLES))
     target = non_local_endpoint(settings.endpoint)
     if target:
         return settings, f"{S3_ENDPOINT_VARIABLE} points at {target} — tests connect to this machine only"
@@ -429,15 +452,226 @@ def s3_client(s3_settings: S3Settings) -> Any:
     )
 
 
+@contextmanager
+def temporary_bucket(client: Any, *, versioned: bool = False) -> Iterator[str]:
+    """A fresh, empty bucket, removed on exit with every version, delete marker and unfinished upload."""
+    name = TEST_BUCKET_PREFIX + uuid.uuid4().hex[:12]
+    client.create_bucket(Bucket=name)
+    try:
+        if versioned:
+            client.put_bucket_versioning(Bucket=name, VersioningConfiguration={"Status": "Enabled"})
+        yield name
+    finally:
+        for page in client.get_paginator("list_object_versions").paginate(Bucket=name):
+            for item in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]:
+                client.delete_object(Bucket=name, Key=item["Key"], VersionId=item["VersionId"])
+        for page in client.get_paginator("list_multipart_uploads").paginate(Bucket=name):
+            for upload in page.get("Uploads", []):
+                client.abort_multipart_upload(Bucket=name, Key=upload["Key"], UploadId=upload["UploadId"])
+        client.delete_bucket(Bucket=name)
+
+
 @pytest.fixture
 def s3_bucket(s3_client: Any) -> Iterator[str]:
     """A fresh, empty bucket on the local object store, removed with its objects when the test ends."""
-    name = TEST_BUCKET_PREFIX + uuid.uuid4().hex[:12]
-    s3_client.create_bucket(Bucket=name)
-    try:
+    with temporary_bucket(s3_client) as name:
         yield name
-    finally:
-        listed = s3_client.list_objects_v2(Bucket=name).get("Contents", [])
-        for item in listed:
-            s3_client.delete_object(Bucket=name, Key=item["Key"])
-        s3_client.delete_bucket(Bucket=name)
+
+
+@pytest.fixture
+def archive_bucket(s3_client: Any) -> Iterator[str]:
+    """A fresh, empty, unversioned bucket for an archive test."""
+    with temporary_bucket(s3_client) as name:
+        yield name
+
+
+@pytest.fixture
+def versioned_archive_bucket(s3_client: Any) -> Iterator[str]:
+    """A fresh, empty bucket with versioning enabled; teardown removes every version and delete marker."""
+    with temporary_bucket(s3_client, versioned=True) as name:
+        yield name
+
+
+def s3_archive_settings(bucket: str, settings: S3Settings, monkeypatch: pytest.MonkeyPatch) -> ArchiveSettings:
+    """`ArchiveSettings` for *bucket* on the local object store, naming the test variables and setting them.
+
+    The variables are set to the guarded values, so the library reads them as it would in a consumer's environment.
+    """
+    values = zip(S3_VARIABLES, settings, strict=True)
+    for variable, value in values:
+        monkeypatch.setenv(variable, value)
+    return ArchiveSettings(
+        backend="s3",
+        bucket=bucket,
+        region="us-east-1",
+        endpoint_url_env=S3_ENDPOINT_VARIABLE,
+        writer=CredentialSettings(S3_WRITER_ACCESS_KEY_VARIABLE, S3_WRITER_SECRET_KEY_VARIABLE),
+        deleter=CredentialSettings(S3_DELETER_ACCESS_KEY_VARIABLE, S3_DELETER_SECRET_KEY_VARIABLE),
+    )
+
+
+@pytest.fixture
+def archive_settings_s3(
+    archive_bucket: str, s3_settings: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> ArchiveSettings:
+    """Settings of an s3 archive in a fresh unversioned bucket, with the writer and deleter test credentials."""
+    return s3_archive_settings(archive_bucket, s3_settings, monkeypatch)
+
+
+@pytest.fixture
+def archive_settings_s3_versioned(
+    versioned_archive_bucket: str, s3_settings: S3Settings, monkeypatch: pytest.MonkeyPatch
+) -> ArchiveSettings:
+    """Settings of an s3 archive in a fresh versioned bucket."""
+    return s3_archive_settings(versioned_archive_bucket, s3_settings, monkeypatch)
+
+
+@pytest.fixture
+def archive_settings_dir(tmp_path: Path) -> ArchiveSettings:
+    """Settings of a directory archive in a fresh directory."""
+    root = tmp_path / "archive"
+    root.mkdir()
+    return ArchiveSettings(backend="directory", path=root)
+
+
+# --- shared helpers of the Hodir tests (an archive session over each backend, one stored content, fault injection) ---
+
+# The backends a session test runs over; only the bucket case is marked `s3`. The storage-interface tests add a
+# versioned bucket and keep their own list.
+ARCHIVE_BACKENDS = [pytest.param("directory", id="directory"), pytest.param("s3", id="s3", marks=pytest.mark.s3)]
+ARCHIVE_SETTINGS_FIXTURES = {"directory": "archive_settings_dir", "s3": "archive_settings_s3"}
+CONTENT = b"the vault keeps this"
+CONTENT_CHECKSUM = hashlib.sha256(CONTENT).digest()
+
+
+class Fault(Exception):
+    """What `FaultyStore` raises: no store or driver error looks like it, so a test sees exactly its own failure."""
+
+
+class FaultyStore:
+    """A writing store that forwards every call to a real one and raises `Fault` after the *nth* call of *method*.
+
+    The call itself is made first, so the failure falls between two steps of a put, never inside one. With
+    *hide_head* the first that many `head` calls report the object as absent, as a deletion racing the put would.
+    """
+
+    def __init__(self, store: Any, method: str = "", nth: int = 1, hide_head: int = 0) -> None:
+        self._store = store
+        self._method = method
+        self._nth = nth
+        self._hide_head = hide_head
+        self.calls: dict[str, int] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._store, name)
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            self.calls[name] = self.calls.get(name, 0) + 1
+            result = target(*args, **kwargs)
+            if name == "head" and self.calls[name] <= self._hide_head:
+                return None
+            if name == self._method and self.calls[name] == self._nth:
+                raise Fault(f"after {name}")
+            return result
+
+        return call
+
+
+def archive_config(archivum: Archivum, tmp_path: Path, settings: ArchiveSettings) -> UlduarConfig:
+    """An onboarded config (project `alpha`) with the archive of *settings* and a spool directory of its own."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    return replace(onboarded(archivum, tmp_path), archive=replace(settings, spool_dir=spool))
+
+
+@pytest.fixture(params=ARCHIVE_BACKENDS)
+def config(request: pytest.FixtureRequest, archivum: Archivum, tmp_path: Path) -> UlduarConfig:
+    """An onboarded config (project `alpha`) with the archive of each backend in turn."""
+    return archive_config(archivum, tmp_path, request.getfixturevalue(ARCHIVE_SETTINGS_FIXTURES[request.param]))
+
+
+@pytest.fixture
+def source(tmp_path: Path) -> Path:
+    """A file holding `CONTENT`."""
+    path = tmp_path / "source.bin"
+    path.write_bytes(CONTENT)
+    return path
+
+
+@contextmanager
+def faulty_archive(config: UlduarConfig, **fault: Any) -> Iterator[tuple[Archive, FaultyStore]]:
+    """An `Archive` over the real store wrapped in a `FaultyStore`, on its own catalog session."""
+    assert config.archive is not None
+    with open_catalog(config) as catalog:
+        store = FaultyStore(open_store(config.archive), **fault)
+        yield Archive(catalog, store, config.archive), store  # type: ignore[arg-type]
+
+
+def object_key(scope: str = "default") -> str:
+    """The key of the object `CONTENT` is stored under, for project `alpha`."""
+    return hodir_layout.object_key("alpha", scope, CONTENT_CHECKSUM)
+
+
+def archive_file(config: UlduarConfig, source: Path) -> Artifact:
+    with open_archive(config) as session:
+        return session.put_file(source, "report")
+
+
+@pytest.fixture
+def tamper(config: UlduarConfig, request: pytest.FixtureRequest) -> Callable[[str, bytes | None], None]:
+    """Overwrite the stored object at a key with the given bytes, or remove it for None: the test's own tampering."""
+    settings = config.archive
+    assert settings is not None
+    if settings.backend == "directory":
+        assert settings.path is not None
+
+        def on_disk(key: str, data: bytes | None) -> None:
+            path = settings.path / settings.prefix / key  # type: ignore[operator]
+            if data is None:
+                path.unlink()
+            else:
+                path.chmod(0o644)
+                path.write_bytes(data)
+
+        return on_disk
+    client = request.getfixturevalue("s3_client")
+
+    def in_bucket(key: str, data: bytes | None) -> None:
+        full = f"{settings.prefix}/{key}"
+        if data is None:
+            client.delete_object(Bucket=settings.bucket, Key=full)
+        else:
+            client.put_object(Bucket=settings.bucket, Key=full, Body=data)
+
+    return in_bucket
+
+
+def record_confirmed_deletion(archivum: Archivum, artifact: Artifact) -> None:
+    """Record, as the test (a superuser), an intent and its confirmation for the content of *artifact*."""
+    insert = (
+        "INSERT INTO ulduar.archive_deletion (project_id, deletion_id, event_at, scope, checksum, size_bytes, stage,"
+        " intent_id, cause) SELECT project_id, %s, %s, %s, %s, %s, %s, %s, 'incomplete_put'"
+        " FROM ulduar.project WHERE name = 'alpha'"
+    )
+    intent_id, outcome_id = _ids.uuid7(), _ids.uuid7()
+    with archivum.superuser() as su:
+        for deletion_id, stage, intent in ((intent_id, "intent", None), (outcome_id, "confirmed", intent_id)):
+            params = (deletion_id, _ids.uuid7_time(deletion_id), artifact.scope, artifact.checksum, artifact.size)
+            su.execute(insert, (*params, stage, intent))
+
+
+def backdate_registration(archivum: Archivum, artifact: Artifact, days: int) -> None:
+    """Make the registration of *artifact* *days* older, as the test (a superuser) tampering with its database.
+
+    Retention counts an object's age from the registration's `recorded_at`, which the database stamps itself and
+    the append-only trigger refuses to change, so the only way to test an age is to switch the triggers off for
+    one transaction of the throwaway database (`session_replication_role = replica`, a superuser's setting,
+    local to the transaction) and move the stamp back.
+    """
+    with archivum.superuser() as su, su.transaction():
+        su.execute("SET LOCAL session_replication_role = replica")
+        su.execute(
+            "UPDATE ulduar.archive_registration SET recorded_at = recorded_at - make_interval(days => %s)"
+            " WHERE artifact_id = %s",
+            (days, artifact.artifact_id),
+        )

@@ -19,18 +19,17 @@ from psycopg import sql
 from psycopg.rows import TupleRow
 
 from ulduar import _db, _ids
+from ulduar._schema import Connection, qualified
 from ulduar.config import ArchivumSettings
 from ulduar.errors import UlduarError
 from ulduar.freya._records import (
     Artifact,
-    Connection,
     Dataset,
     LineageEdge,
     LineageNode,
     NodeRef,
     Project,
     insert_with_partition_retry,
-    qualified,
 )
 
 Node = Artifact | Dataset | NodeRef

@@ -20,8 +20,10 @@ error is left to ruff. Tests: `tests/test_check_conventions.py`.
 | C7 | R10 | package `.py` | an import of `argparse`, `click` or `typer` | the package's `mimiron` module |
 | C8 | R11 | all files | a tracked `.env*`, `*.pem`, `*.pfx`, `*.key`, `*.egg-info` or `settings.local.json` | — |
 | C9 | R9 | `tests/*.py` | the names `skip`, `skipif`, `xfail`, `importorskip`, `SkipTest`, `skipTest`, `skipIf`, `skipUnless` or `expectedFailure`, as an attribute, a bare name or an import | `tests/conftest.py` |
+| C10 | R10 | package `.py` inside a component (a sub-package `ulduar/<name>/` whose name does not start with `_`) | an import of `ulduar.<Y>.<anything>`, or of a `_`-prefixed name from the facade `ulduar.<Y>`, for another component Y; the facade itself, its public names, the shared `ulduar._*` modules, the file's own component and relative imports are allowed | — |
 
-R5, R6, R7, R11 beyond C8, and the parts of R1, R3 and R10 a parser cannot see are review-enforced
+R5, R6, R7, R11 beyond C8, and the parts of R1, R3 and R10 a parser cannot see (that the `mimiron` entry holds
+command flow only, that a facade only re-exports, a top-level module reaching into a component) are review-enforced
 (`references/conventions.md`). C3 sees only a formatted string passed directly; a statement formatted on an
 earlier line, or built from two variables, is the reviewer's to catch.
 

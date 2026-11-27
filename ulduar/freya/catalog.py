@@ -10,35 +10,38 @@ meets a month without a partition creates it once through the step's own functio
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
+from datetime import datetime
 from uuid import UUID
 
 from psycopg import sql
 
 from ulduar import _db, _ids
+from ulduar._schema import (
+    CHECKSUM_ALGORITHM,
+    NAME_MAX,
+    NAMESPACE_MAX,
+    Connection,
+    check_checksum,
+    check_kind,
+    check_origin,
+    check_text,
+    qualified,
+)
 from ulduar.config import ArchivumSettings, Config, check_name
 from ulduar.errors import UlduarError, UnknownRecordError
 from ulduar.freya import ledger, lineage
 from ulduar.freya._records import (
     Artifact,
-    Connection,
     Dataset,
     LineageEdge,
     LineageNode,
     NodeRef,
     Project,
+    Result,
     insert_with_partition_retry,
-    qualified,
 )
-
-# The rows of `ulduar.artifact_kind` (step 1 is the schema's home; a test holds the two equal).
-ARTIFACT_KINDS = ("raw_file", "database_dump", "report", "model", "log")
-CHECKSUM_ALGORITHM = "sha256"
-CHECKSUM_BYTES = 32
-NAMESPACE_MAX = 200
-NAME_MAX = 500
-ORIGIN_MAX = 1000
 
 _PROJECT = qualified("project")
 _SCOPE = qualified("scope")
@@ -81,32 +84,12 @@ _SELECT_ARTIFACT = sql.SQL("SELECT {columns} FROM {table} WHERE project_id = %s 
 _FIND_ARTIFACTS = sql.SQL("SELECT {columns} FROM {table} WHERE {conditions} ORDER BY event_at, artifact_id")
 
 
-def _check_text(argument: str, value: str | None, limit: int, *, required: bool = True) -> None:
-    """*value* is a string of 1 to *limit* characters (or None when not *required*); the message names the length."""
-    if value is None and not required:
-        return
-    if not isinstance(value, str) or not 1 <= len(value) <= limit:
-        found = f"{len(value)} characters" if isinstance(value, str) else f"a {type(value).__name__}"
-        raise ValueError(f"The {argument} must be a string of 1 to {limit} characters, got {found}")
-
-
-def _check_kind(kind: str) -> None:
-    if kind not in ARTIFACT_KINDS:
-        raise ValueError(f"Artifact kind {kind!r} is not one of {', '.join(ARTIFACT_KINDS)}")
-
-
-def _check_checksum(checksum: bytes) -> None:
-    if not isinstance(checksum, bytes) or len(checksum) != CHECKSUM_BYTES:
-        found = f"{len(checksum)} bytes" if isinstance(checksum, bytes) else f"a {type(checksum).__name__}"
-        raise ValueError(f"The checksum must be a SHA-256 digest of {CHECKSUM_BYTES} bytes, got {found}")
-
-
 def _check_artifact(kind: str, checksum: bytes, size: int, origin: str | None) -> None:
-    _check_kind(kind)
-    _check_checksum(checksum)
+    check_kind(kind)
+    check_checksum(checksum)
     if isinstance(size, bool) or not isinstance(size, int) or size < 0:
         raise ValueError(f"The size {size!r} must be a non-negative integer")
-    _check_text("origin", origin, ORIGIN_MAX, required=False)
+    check_origin(origin)
 
 
 def _record_id(record_id: UUID | None) -> UUID:
@@ -134,13 +117,30 @@ class Catalog:
         """One transaction whose driver errors are raised as the package's exceptions, worded `<what> failed`."""
         return _db.translated_transaction(self._conn, self._settings, what)
 
+    def transaction(
+        self, what: str, work: Callable[[Connection], Result], *, event_ats: Sequence[datetime] = ()
+    ) -> Result:
+        """Run *work* in one transaction on this session's connection and return what it returns.
+
+        The hook through which Ulduar's other components (Hodir now, Thorim and Algalon later) record on the
+        job's one connection (H23): the transaction carries the session's time limits, and a driver error is
+        raised as the package's exception, worded `<what> failed: ...`. With *event_ats*, the times of the
+        partitioned rows *work* writes, a month without a partition is created once and *work* runs again, so
+        *work* must be safe to run twice.
+        """
+        if event_ats:
+            with _db.translated(what):
+                return insert_with_partition_retry(self._conn, self._settings, event_ats, work)
+        with self._transaction(what) as tx:
+            return work(tx)
+
     def _scope(self, scope: str | None) -> str:
         return self.scope if scope is None else check_name(scope, "scope")
 
     def register_dataset(self, namespace: str, name: str, *, scope: str | None = None) -> Dataset:
         """Register the dataset *namespace*/*name* in the scope; registering it again returns the existing one."""
-        _check_text("namespace", namespace, NAMESPACE_MAX)
-        _check_text("name", name, NAME_MAX)
+        check_text("namespace", namespace, NAMESPACE_MAX)
+        check_text("name", name, NAME_MAX)
         scope = self._scope(scope)
         dataset_id = _ids.uuid7()
         params = (self.project.project_id, scope, dataset_id, namespace, name, _ids.uuid7_time(dataset_id))
@@ -228,9 +228,9 @@ class Catalog:
     ) -> list[Artifact]:
         """The scope's artifacts (default: the catalog's) that match every given filter, oldest first."""
         if kind is not None:
-            _check_kind(kind)
+            check_kind(kind)
         if checksum is not None:
-            _check_checksum(checksum)
+            check_checksum(checksum)
         filters = {
             "scope": self._scope(scope),
             "checksum": checksum,
